@@ -432,7 +432,7 @@ def set_execution_target(
             print(f"... execute using Sampler on {backend_id=} with {options=}")
 
             # create the Qiskit Sampler with these options
-            sampler = SamplerV2(backend=backend, options=options)
+            sampler = SamplerV2(session if session else backend, options=options)
 
     # create an informative device name for plots
     device_name = backend_id
@@ -593,7 +593,6 @@ def execute_circuit(circuit):
 
         # used in Sampler setup, here remove it for execution
         this_use_sessions = backend_exec_options_copy.pop("use_sessions", None)
-        resilience_level = backend_exec_options_copy.pop("resilience_level", None)
 
         # standard Qiskit transpiler options
         optimization_level = backend_exec_options_copy.pop("optimization_level", None)
