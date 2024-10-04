@@ -35,11 +35,17 @@ from datetime import datetime, timedelta
 import metrics  # QED-C modules
 import numpy as np
 from qiskit import transpile
-from qiskit.primitives import StatevectorSampler
+from qiskit.primitives import StatevectorSampler, StatevectorEstimator
 from qiskit.providers.jobstatus import JobStatus
 from qiskit_aer import AerSimulator, StatevectorSimulator
 from qiskit_aer.noise import NoiseModel, ReadoutError, depolarizing_error, reset_error
-from qiskit_ibm_runtime import SamplerOptions, QiskitRuntimeService, SamplerV2
+from qiskit_ibm_runtime import (
+    SamplerOptions,
+    QiskitRuntimeService,
+    SamplerV2,
+    EstimatorV2,
+    EstimatorOptions,
+)
 
 ##########################
 # JOB MANAGEMENT VARIABLES
@@ -71,6 +77,7 @@ session_count = 0
 # internal session variables: users do not access
 session = None
 sampler = None
+estimator = None
 
 # Use the IBM Quantum Platform system; default is to use the IBM Cloud
 use_ibm_quantum_platform = False
@@ -272,6 +279,7 @@ def set_execution_target(
     """
     global backend
     global sampler
+    global estimator
     global session
     global use_sessions
     global session_count
@@ -323,6 +331,9 @@ def set_execution_target(
 
     elif backend_id == "statevector_sampler":
         sampler = StatevectorSampler()
+
+    elif backend_id == "statevector_estimator":
+        estimator = StatevectorEstimator()
 
     # handle 'fake' backends here
     elif "fake" in backend_id:
@@ -398,12 +409,23 @@ def set_execution_target(
                 instance = None
             print(f"... using Qiskit Runtime {channel=} {instance=}")
 
+            if " " in backend_id:
+                backend_name, primitive_name = backend_id.split(" ")
+            else:
+                backend_name = backend_id
+                primitive_name = "sampler"
+            if primitive_name not in ["sampler", "estimator"]:
+                raise ValueError(
+                    f"invalid primitive name: {primitive_name}. Should be 'sampler' or 'estimator'"
+                )
+
             try:
                 service = QiskitRuntimeService(channel=channel, instance=instance)
-                backend = service.backend(backend_id)
+                backend = service.backend(backend_name)
             except Exception as ex:
                 print(authentication_error_msg.format(backend_id))
                 raise ex
+            print(f"... using {backend=} {primitive_name=}")
 
             # DEVNOTE: here we assume if the sessions flag is set, we use Sampler
             # however, we may want to add a use_sampler option so that we can separate these
@@ -426,13 +448,18 @@ def set_execution_target(
                     print("... not using sessions")
 
             # set Sampler options
-            options_dict = exec_options.get("sampler_options", None)
-            options = SamplerOptions(**options_dict)
-
-            print(f"... execute using Sampler on {backend_id=} with {options=}")
-
-            # create the Qiskit Sampler with these options
-            sampler = SamplerV2(session if session else backend, options=options)
+            if primitive_name == "sampler":
+                options_dict = exec_options.get("sampler_options", None)
+                options = SamplerOptions(**options_dict)
+                print(f"... execute using Sampler on {backend_name=} with {options=}")
+                sampler = SamplerV2(session if session else backend, options=options)
+            else:
+                options_dict = exec_options.get("estimator_options", None)
+                options = EstimatorOptions(**options_dict)
+                print(f"... execute using Estimator on {backend_name=} with {options=}")
+                estimator = EstimatorV2(
+                    session if session else backend, options=options
+                )
 
     # create an informative device name for plots
     device_name = backend_id
@@ -531,7 +558,7 @@ def submit_circuit(qc, group_id, circuit_id, shots=100, params=None):
 
 
 # Launch execution of one job (circuit)
-def execute_circuit(circuit):
+def execute_circuit(circuit: dict):
     logging.info("Entering execute_circuit")
 
     active_circuit = copy.copy(circuit)
@@ -760,6 +787,264 @@ def execute_circuit(circuit):
                 )
                 if verbose_time:
                     print(f"  *** qiskit.run() time = {round(time.time() - st, 5)}")
+
+    except Exception as e:
+        print(
+            f'ERROR: Failed to execute circuit {active_circuit["group"]} {active_circuit["circuit"]}'
+        )
+        print(f"... exception = {e}")
+        if verbose:
+            print(traceback.format_exc())
+        return
+
+    # print("Job status is ", job.status() )
+
+    # put job into the active circuits with circuit info
+    active_circuits[job] = active_circuit
+    # print("... active_circuit = ", str(active_circuit))
+
+    # store circuit dimensional metrics
+    metrics.store_metric(
+        active_circuit["group"], active_circuit["circuit"], "depth", qc_depth
+    )
+    metrics.store_metric(
+        active_circuit["group"], active_circuit["circuit"], "size", qc_size
+    )
+    metrics.store_metric(
+        active_circuit["group"], active_circuit["circuit"], "xi", qc_xi
+    )
+    metrics.store_metric(
+        active_circuit["group"], active_circuit["circuit"], "n2q", qc_n2q
+    )
+
+    metrics.store_metric(
+        active_circuit["group"], active_circuit["circuit"], "tr_depth", qc_tr_depth
+    )
+    metrics.store_metric(
+        active_circuit["group"], active_circuit["circuit"], "tr_size", qc_tr_size
+    )
+    metrics.store_metric(
+        active_circuit["group"], active_circuit["circuit"], "tr_xi", qc_tr_xi
+    )
+    metrics.store_metric(
+        active_circuit["group"], active_circuit["circuit"], "tr_n2q", qc_tr_n2q
+    )
+
+    # also store the job_id for future reference
+    metrics.store_metric(
+        active_circuit["group"], active_circuit["circuit"], "job_id", job.job_id()
+    )
+
+    if verbose:
+        print(f"  ... executing job {job.job_id()}")
+
+    # special handling when only runnng one job at a time: wait for result here
+    # so the status check called later immediately returns done and avoids polling
+    if max_jobs_active <= 1:
+        wait_on_job_result(job, active_circuit)
+
+    # return, so caller can do other things while waiting for jobs to complete
+
+
+######################################################################
+# PUB EXECUTION METHODS
+
+
+# Submit pub for execution
+# Execute immediately if possible or put into the list of batched circuits
+def submit_pub(pub, group_id, circuit_id, shots=100, params=None):
+    # create circuit object with submission time and circuit info
+    circuit = {
+        "pub": pub,
+        "qc": pub.circuit,
+        "group": str(group_id),
+        "circuit": str(circuit_id),
+        "submit_time": time.time(),
+        "shots": shots,
+        "params": params,
+    }
+
+    if verbose:
+        print(
+            f'... submit pub - group={circuit["group"]} id={circuit["circuit"]} shots={circuit["shots"]} params={circuit["params"]}'
+        )
+
+    # logger doesn't like unicode, so just log the array values for now
+    # logger.info(f'Submitting circuit - group={circuit["group"]} id={circuit["circuit"]} shots={circuit["shots"]} params={str(circuit["params"])}')
+    logger.info(
+        f'Submitting pub - group={circuit["group"]} id={circuit["circuit"]} shots={circuit["shots"]} params={[param[1] for param in params.items()] if params else None}'
+    )
+
+    # immediately post the circuit for execution if active jobs < max
+    if len(active_circuits) < max_jobs_active:
+        execute_pub(circuit)
+
+    # or just add it to the batch list for execution after others complete
+    else:
+        batched_circuits.append(circuit)
+        if verbose:
+            print("  ... added circuit to batch")
+
+
+# Launch execution of one job (pub)
+def execute_pub(circuit):
+    logging.info("Entering execute_pub")
+
+    active_circuit = copy.copy(circuit)
+    active_circuit["launch_time"] = time.time()
+    active_circuit["pollcount"] = 0
+
+    shots = circuit["shots"]
+
+    qc = circuit["qc"]
+
+    # obtain initial circuit metrics
+    qc_depth, qc_size, qc_count_ops, qc_xi, qc_n2q = get_circuit_metrics(qc)
+
+    # default the normalized transpiled metrics to the same, in case exec fails
+    qc_tr_depth = qc_depth
+    qc_tr_size = qc_size
+    qc_tr_count_ops = qc_count_ops
+    qc_tr_xi = qc_xi
+    qc_tr_n2q = qc_n2q
+    # print(f"... before tp: {qc_depth} {qc_size} {qc_count_ops}")
+
+    backend_name = get_backend_name(backend)
+
+    try:
+        # transpile the circuit to obtain size metrics using normalized basis
+        if do_transpile_metrics and use_normalized_depth:
+            qc_tr_depth, qc_tr_size, qc_tr_count_ops, qc_tr_xi, qc_tr_n2q = (
+                transpile_for_metrics(qc)
+            )
+
+            # we want to ignore elapsed time contribution of transpile for metrics (normalized depth)
+            active_circuit["launch_time"] = time.time()
+
+        # use noise model from execution options if given for simulator
+        this_noise = noise
+
+        # make a clone of the backend options so we can remove elements that we use, then pass to .run()
+        global backend_exec_options
+        backend_exec_options_copy = copy.copy(backend_exec_options)
+
+        # get noise model from options; used only in simulator for now
+        if (
+            backend_exec_options_copy is not None
+            and "noise_model" in backend_exec_options_copy
+        ):
+            this_noise = backend_exec_options_copy["noise_model"]
+            # print(f"... using custom noise model: {this_noise}")
+
+        # extract execution options if set
+        if backend_exec_options_copy is None:
+            backend_exec_options_copy = {}
+
+        # standard Qiskit transpiler options
+        optimization_level = backend_exec_options_copy.pop("optimization_level", None)
+        layout_method = backend_exec_options_copy.pop("layout_method", None)
+        routing_method = backend_exec_options_copy.pop("routing_method", None)
+
+        # option to transpile multiple times to find best one
+        transpile_attempt_count = backend_exec_options_copy.pop(
+            "transpile_attempt_count", None
+        )
+
+        # generalized transformer method, custom to user
+        transformer = backend_exec_options_copy.pop("transformer", None)
+
+        global result_processor, width_processor
+        postprocessors = backend_exec_options_copy.pop("postprocessor", None)
+        if postprocessors:
+            result_processor, width_processor = postprocessors
+
+        ##############
+        # if 'executor' is provided, perform all execution there and return
+        # the executor returns a result object that implements get_counts(qc)
+        executor = None
+        if backend_exec_options_copy is not None:
+            executor = backend_exec_options_copy.pop("executor", None)
+
+        # NOTE: the executor does not perform any other optional processing
+        # Also, the result_handler is called before elapsed_time processing which is not correct
+        if executor:
+            st = time.time()
+
+            # invoke custom executor function with backend options
+            pub = circuit["pub"]
+            result = executor(
+                pub, backend_name, backend, shots=shots, **backend_exec_options_copy
+            )
+
+            if verbose_time:
+                print(f"  *** executor() time = {round(time.time() - st,4)}")
+
+            # create a pseudo-job to perform metrics processing upon return
+            job = Job()
+
+            # store the result object on the job for processing in job_complete
+            job.executor_result = result
+
+        ##############
+        # normal execution processing is performed here
+        else:
+            logger.info(f"Executing on backend: {backend_name}")
+
+            # Initiate execution for all other backends and noiseless simulator
+
+            # if set, transpile many times and pick shortest circuit
+            # DEVNOTE: this does not handle parameters yet, or optimizations
+            if transpile_attempt_count:
+                trans_qc = transpile_multiple_times(
+                    circuit["qc"],
+                    circuit["params"],
+                    backend,
+                    transpile_attempt_count,
+                    optimization_level=None,
+                    layout_method=None,
+                    routing_method=None,
+                )
+
+            # transpile and bind circuit with parameters; use cache if flagged
+            else:
+                trans_qc = transpile_and_bind_circuit(
+                    circuit["qc"],
+                    circuit["params"],
+                    backend,
+                    optimization_level=optimization_level,
+                    layout_method=layout_method,
+                    routing_method=routing_method,
+                )
+
+            # apply transformer pass if provided
+            if transformer:
+                trans_qc, shots = invoke_transformer(
+                    transformer, trans_qc, backend=backend, shots=shots
+                )
+
+            # Indicate number of qubits about to be executed
+            if width_processor:
+                width_processor(qc)
+
+            # to execute on Aer state vector simulator, need to remove measurements
+            if backend_name.lower() == "statevector_simulator":
+                trans_qc = trans_qc.remove_final_measurements(inplace=False)
+
+            # *************************************
+            # perform circuit execution on backend
+            logger.info(f"Running trans_qc, shots={shots}")
+            st = time.time()
+
+            if sampler:
+                job = sampler.run([trans_qc], shots=shots)
+            else:
+                job = backend.run(trans_qc, shots=shots, **backend_exec_options_copy)
+
+            logger.info(
+                f"Finished Running trans_qc - {round(time.time() - st, 5)} (ms)"
+            )
+            if verbose_time:
+                print(f"  *** qiskit.run() time = {round(time.time() - st, 5)}")
 
     except Exception as e:
         print(

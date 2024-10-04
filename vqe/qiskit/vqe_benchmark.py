@@ -32,7 +32,7 @@ CO_ = None
 
 # Construct a Qiskit circuit for VQE Energy evaluation with UCCSD ansatz
 # param: n_spin_orbs - The number of spin orbitals.
-# return: return a Qiskit circuit for this VQE ansatz
+# return: return a Qiskit pubs for this VQE ansatz
 def VQEEnergy(n_spin_orbs, na, nb, circuit_id=0, method=1):
 
     # number of alpha spin orbitals
@@ -81,10 +81,10 @@ def VQEEnergy(n_spin_orbs, na, nb, circuit_id=0, method=1):
     # method 1, only compute the last term in the Hamiltonian
     if method == 1:
         # last term in Hamiltonian
-        qc_with_mea, is_diag = ExpectationCircuit(qc, qubit_op[1], num_qubits)
-
-        # return the circuit
-        return qc_with_mea
+        return qc, qubit_op[1]
+    else:
+        pass
+        #return qc, qubit_op
 
     # now we need to add the measurement parts to the circuit
     # circuit list 
@@ -399,8 +399,8 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
         # create the circuit for given qubit size and simulation parameters, store time metric
         ts = time.time()
 
-        # circuit list 
-        qc_list = []
+        # pub list 
+        pub_list = []
 
         # Method 1 (default)
         if method == 1:
@@ -408,22 +408,24 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
             for circuit_id in range(num_circuits):
 
                 # construct circuit 
-                qc_single = VQEEnergy(num_qubits, na, nb, circuit_id, method)               
-                qc_single.name = qc_single.name + " " + str(circuit_id) 
+                pub = VQEEnergy(num_qubits, na, nb, circuit_id, method)               
+                pub[0].name = pub[0].name + " " + str(circuit_id) 
 
                 # add to list 
-                qc_list.append(qc_single)
+                pub_list.append(pub)
         # method 2
         elif method == 2:
 
             # construct all circuits
-            qc_list = VQEEnergy(num_qubits, na, nb, 0, method)
+            pub_list = VQEEnergy(num_qubits, na, nb, 0, method)
 
-        print(f"************\nExecuting [{len(qc_list)}] circuits with num_qubits = {num_qubits}")
+        print(f"************\nExecuting [{len(pub_list)}] pubs with num_qubits = {num_qubits}")
 
-        for qc in qc_list:
+        for pub in pub_list:
+            qc = pub[0]
 
             # get circuit id
+            print(qc.name)
             if method == 1:
                 circuit_id = qc.name.split()[2]
             else:
@@ -433,10 +435,11 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
             metrics.store_metric(input_size, circuit_id, 'create_time', time.time() - ts)
 
             # collapse the sub-circuits used in this benchmark (for qiskit)
-            qc2 = qc.decompose()
+            pub2 = (qc.decompose(), pub[1])
 
             # submit circuit for execution on target (simulator, cloud simulator, or hardware)
-            ex.submit_circuit(qc2, input_size, circuit_id, num_shots)
+            # ex.submit_circuit(qc2, input_size, circuit_id, num_shots)
+            ex.submit_pub(pub2, input_size, circuit_id, num_shots)
 
         # Wait for some active circuits to complete; report metrics when group complete
         ex.throttle_execution(metrics.finalize_group)
