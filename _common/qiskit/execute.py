@@ -34,17 +34,20 @@ from datetime import datetime, timedelta
 
 import metrics  # QED-C modules
 import numpy as np
-from qiskit import transpile
-from qiskit.primitives import StatevectorSampler, StatevectorEstimator
+from qiskit import QuantumCircuit, transpile
+from qiskit.primitives import StatevectorEstimator, StatevectorSampler
+from qiskit.primitives.containers.estimator_pub import EstimatorPub
+from qiskit.primitives.containers.observables_array import ObservablesArray
 from qiskit.providers.jobstatus import JobStatus
+from qiskit.quantum_info import SparsePauliOp
 from qiskit_aer import AerSimulator, StatevectorSimulator
 from qiskit_aer.noise import NoiseModel, ReadoutError, depolarizing_error, reset_error
 from qiskit_ibm_runtime import (
-    SamplerOptions,
-    QiskitRuntimeService,
-    SamplerV2,
-    EstimatorV2,
     EstimatorOptions,
+    EstimatorV2,
+    QiskitRuntimeService,
+    SamplerOptions,
+    SamplerV2,
 )
 
 ##########################
@@ -146,18 +149,34 @@ basis_gates_array = [
 # from the quasi distributions and shots taken.
 class BenchmarkResult:
     def __init__(self, qiskit_result):
-        super().__init__()
         self.qiskit_result = qiskit_result
         self.metadata = qiskit_result.metadata
 
+    def is_estimator_result(self) -> bool:
+        if len(self.qiskit_result) == 0:
+            raise RuntimeError("Result is empty")
+        data = self.qiskit_result[0].data
+        return "evs" in data and "stds" in data
+
     def get_counts(self, qc=0):
-        # counts= self.qiskit_result.quasi_dists[0].binary_probabilities()
-        # for key in counts.keys():
-        #     counts[key] = int(counts[key] * self.qiskit_result.metadata[0]['shots'])
-        qc_index = 0  # this should point to the index of the circuit in a pub
-        bitvals = next(iter(self.qiskit_result[qc_index].data.values()))
+        # TODO: need to refactor the caller of get_counts not to submit QuantumCircuit
+        # and use index instead to be compatible with PrimitiveResult
+        if self.is_estimator_result():
+            raise RuntimeError(
+                "You cannot use `get_counts` because this result is Estimator result"
+            )
+        index = 0
+        bitvals = next(iter(self.qiskit_result[index].data.values()))
         counts = bitvals.get_counts()
         return counts
+
+    def get_expectation_values(self, qc=0):
+        if not self.is_estimator_result():
+            raise RuntimeError(
+                "You cannot use `get_expectation_values` because this result is not Estimator result"
+            )
+        index = 0
+        return self.qiskit_result[index].data.evs
 
 
 # Special Job object class to hold job information for custom executors
@@ -852,7 +871,7 @@ def execute_circuit(circuit: dict):
 
 # Submit pub for execution
 # Execute immediately if possible or put into the list of batched circuits
-def submit_pub(pub, group_id, circuit_id, shots=100, params=None):
+def submit_pub(pub, group_id, circuit_id, precision=0.01, params=None):
     # create circuit object with submission time and circuit info
     circuit = {
         "pub": pub,
@@ -860,19 +879,20 @@ def submit_pub(pub, group_id, circuit_id, shots=100, params=None):
         "group": str(group_id),
         "circuit": str(circuit_id),
         "submit_time": time.time(),
-        "shots": shots,
+        "precision": precision,
         "params": params,
+        "shots": -1,  # workaround to avoid error
     }
 
     if verbose:
         print(
-            f'... submit pub - group={circuit["group"]} id={circuit["circuit"]} shots={circuit["shots"]} params={circuit["params"]}'
+            f'... submit pub - group={circuit["group"]} id={circuit["circuit"]} shprecisionots={circuit["precision"]} params={circuit["params"]}'
         )
 
     # logger doesn't like unicode, so just log the array values for now
     # logger.info(f'Submitting circuit - group={circuit["group"]} id={circuit["circuit"]} shots={circuit["shots"]} params={str(circuit["params"])}')
     logger.info(
-        f'Submitting pub - group={circuit["group"]} id={circuit["circuit"]} shots={circuit["shots"]} params={[param[1] for param in params.items()] if params else None}'
+        f'Submitting pub - group={circuit["group"]} id={circuit["circuit"]} precision={circuit["precision"]} params={[param[1] for param in params.items()] if params else None}'
     )
 
     # immediately post the circuit for execution if active jobs < max
@@ -890,13 +910,17 @@ def submit_pub(pub, group_id, circuit_id, shots=100, params=None):
 def execute_pub(circuit):
     logging.info("Entering execute_pub")
 
+    if estimator is None:
+        raise RuntimeError("Estimator is not given")
+
     active_circuit = copy.copy(circuit)
     active_circuit["launch_time"] = time.time()
     active_circuit["pollcount"] = 0
 
-    shots = circuit["shots"]
+    precision = circuit["precision"]
 
-    qc = circuit["qc"]
+    pub: EstimatorPub = circuit["pub"]
+    qc: QuantumCircuit = circuit["qc"]
 
     # obtain initial circuit metrics
     qc_depth, qc_size, qc_count_ops, qc_xi, qc_n2q = get_circuit_metrics(qc)
@@ -944,6 +968,7 @@ def execute_pub(circuit):
         optimization_level = backend_exec_options_copy.pop("optimization_level", None)
         layout_method = backend_exec_options_copy.pop("layout_method", None)
         routing_method = backend_exec_options_copy.pop("routing_method", None)
+        seed_transpiler = backend_exec_options_copy.pop("seed_transpiler", None)
 
         # option to transpile multiple times to find best one
         transpile_attempt_count = backend_exec_options_copy.pop(
@@ -953,102 +978,76 @@ def execute_pub(circuit):
         # generalized transformer method, custom to user
         transformer = backend_exec_options_copy.pop("transformer", None)
 
+        executor = None
+        if backend_exec_options_copy is not None:
+            executor = backend_exec_options_copy.pop("executor", None)
+        if executor:
+            raise NotImplementedError("custom executor is not supported yet")
+
         global result_processor, width_processor
         postprocessors = backend_exec_options_copy.pop("postprocessor", None)
         if postprocessors:
             result_processor, width_processor = postprocessors
 
         ##############
-        # if 'executor' is provided, perform all execution there and return
-        # the executor returns a result object that implements get_counts(qc)
-        executor = None
-        if backend_exec_options_copy is not None:
-            executor = backend_exec_options_copy.pop("executor", None)
-
-        # NOTE: the executor does not perform any other optional processing
-        # Also, the result_handler is called before elapsed_time processing which is not correct
-        if executor:
-            st = time.time()
-
-            # invoke custom executor function with backend options
-            pub = circuit["pub"]
-            result = executor(
-                pub, backend_name, backend, shots=shots, **backend_exec_options_copy
-            )
-
-            if verbose_time:
-                print(f"  *** executor() time = {round(time.time() - st,4)}")
-
-            # create a pseudo-job to perform metrics processing upon return
-            job = Job()
-
-            # store the result object on the job for processing in job_complete
-            job.executor_result = result
-
-        ##############
         # normal execution processing is performed here
-        else:
-            logger.info(f"Executing on backend: {backend_name}")
+        logger.info(f"Executing on backend: {backend_name}")
 
-            # Initiate execution for all other backends and noiseless simulator
+        # Initiate execution for all other backends and noiseless simulator
 
-            # if set, transpile many times and pick shortest circuit
-            # DEVNOTE: this does not handle parameters yet, or optimizations
-            if transpile_attempt_count:
-                trans_qc = transpile_multiple_times(
-                    circuit["qc"],
-                    circuit["params"],
-                    backend,
-                    transpile_attempt_count,
-                    optimization_level=None,
-                    layout_method=None,
-                    routing_method=None,
-                )
-
-            # transpile and bind circuit with parameters; use cache if flagged
-            else:
-                trans_qc = transpile_and_bind_circuit(
-                    circuit["qc"],
-                    circuit["params"],
-                    backend,
-                    optimization_level=optimization_level,
-                    layout_method=layout_method,
-                    routing_method=routing_method,
-                )
-
-            # apply transformer pass if provided
-            if transformer:
-                trans_qc, shots = invoke_transformer(
-                    transformer, trans_qc, backend=backend, shots=shots
-                )
-
-            # Indicate number of qubits about to be executed
-            if width_processor:
-                width_processor(qc)
-
-            # to execute on Aer state vector simulator, need to remove measurements
-            if backend_name.lower() == "statevector_simulator":
-                trans_qc = trans_qc.remove_final_measurements(inplace=False)
-
-            # *************************************
-            # perform circuit execution on backend
-            logger.info(f"Running trans_qc, shots={shots}")
-            st = time.time()
-
-            if sampler:
-                job = sampler.run([trans_qc], shots=shots)
-            else:
-                job = backend.run(trans_qc, shots=shots, **backend_exec_options_copy)
-
-            logger.info(
-                f"Finished Running trans_qc - {round(time.time() - st, 5)} (ms)"
+        # if set, transpile many times and pick shortest circuit
+        # DEVNOTE: this does not handle parameters yet, or optimizations
+        if transpile_attempt_count:
+            trans_qc = transpile_multiple_times(
+                circuit["qc"],
+                circuit["params"],
+                backend,
+                transpile_attempt_count,
+                optimization_level=None,
+                layout_method=None,
+                routing_method=None,
             )
-            if verbose_time:
-                print(f"  *** qiskit.run() time = {round(time.time() - st, 5)}")
+
+        # transpile and bind circuit with parameters; use cache if flagged
+        else:
+            trans_qc = transpile_and_bind_circuit(
+                circuit["qc"],
+                None,  # No need to bind parameters for Primitives
+                backend,
+                optimization_level=optimization_level,
+                layout_method=layout_method,
+                routing_method=routing_method,
+                seed_transpiler=seed_transpiler,
+            )
+
+        # apply transformer pass if provided
+        if transformer:
+            # TODO: need to handle precision instead of shots
+            trans_qc, _ = invoke_transformer(transformer, trans_qc, backend=backend)
+
+        # Indicate number of qubits about to be executed
+        if width_processor:
+            width_processor(qc)
+
+        # transpile observables
+        observables = circuit["pub"].observables
+        trans_obs = transpile_observables(observables, trans_qc)
+        trans_pub = EstimatorPub.coerce((trans_qc, trans_obs, pub.parameter_values))
+
+        # *************************************
+        # perform circuit execution on backend
+        logger.info(f"Running trans_pub, precision={precision}")
+        st = time.time()
+
+        job = estimator.run([trans_pub], precision=precision)
+
+        logger.info(f"Finished Running trans_pub - {round(time.time() - st, 5)} (ms)")
+        if verbose_time:
+            print(f"  *** qiskit.run() time = {round(time.time() - st, 5)}")
 
     except Exception as e:
         print(
-            f'ERROR: Failed to execute circuit {active_circuit["group"]} {active_circuit["circuit"]}'
+            f'ERROR: Failed to execute pub {active_circuit["group"]} {active_circuit["circuit"]}'
         )
         print(f"... exception = {e}")
         if verbose:
@@ -1102,6 +1101,30 @@ def execute_pub(circuit):
         wait_on_job_result(job, active_circuit)
 
     # return, so caller can do other things while waiting for jobs to complete
+
+
+def transpile_observables(
+    observables: ObservablesArray, transpiled_qc: QuantumCircuit
+) -> ObservablesArray:
+    """Transpile observable aligned to the qubit layout of the transpiled circuit
+
+    Args:
+        observables: The observables
+        transpiled_qc: The transpiled quantum circuit
+
+    Returns:
+        ObservablesArray: The observables aligned to the layout of the transpiled quantum circuit
+    """
+    shape = observables.shape
+    layout = transpiled_qc.layout
+    lst = []
+    for tab in observables.ravel().tolist():
+        new_tab = {}
+        for op, coeff in tab.items():
+            op2 = SparsePauliOp(op).apply_layout(layout).to_list()[0][0]
+            new_tab[op2] = coeff
+        lst.append(new_tab)
+    return ObservablesArray.coerce(lst).reshape(shape)
 
 
 # Utility function to obtain name of backend
@@ -1269,6 +1292,7 @@ def transpile_and_bind_circuit(
     optimization_level=None,
     layout_method=None,
     routing_method=None,
+    seed_transpiler=None,
 ):
     logger.info("transpile_and_bind_circuit()")
     st = time.time()
@@ -1283,6 +1307,7 @@ def transpile_and_bind_circuit(
             optimization_level=optimization_level,
             layout_method=layout_method,
             routing_method=routing_method,
+            seed_transpiler=seed_transpiler,
         )
 
         # cache this transpiled circuit
@@ -1352,8 +1377,9 @@ def transpile_multiple_times(
             optimization_level=optimization_level,
             layout_method=layout_method,
             routing_method=routing_method,
+            seed_transpiler=seed,
         )
-        for _ in range(transpile_attempt_count)
+        for seed in range(transpile_attempt_count)
     ]
 
     best_op_count = []
@@ -1509,14 +1535,17 @@ def job_complete(job):
         # that returns counts to the benchmarks in the same form as without sessions
         if sampler:
             result = BenchmarkResult(result)
-            # counts = result.get_counts()
-
-            # actual_shots = result.metadata[0]['shots']
-            # get the name of the classical register
             # TODO: need to rewrite to allow for submit multiple circuits in one job
             # get DataBin associated with the classical register
-            bitvals = next(iter(result.qiskit_result[0].data.values()))
+            pub_result = result.qiskit_result[0]
+            bitvals = next(iter(pub_result.data.values()))
             actual_shots = bitvals.num_shots
+            result_obj = result.metadata  # not sure how to update to be V2 compatible
+            results_obj = result.metadata
+        elif estimator:
+            result = BenchmarkResult(result)
+            pub_result = result.qiskit_result[0]
+            actual_shots = pub_result.metadata.get("shots", 0)
             result_obj = result.metadata  # not sure how to update to be V2 compatible
             results_obj = result.metadata
         else:
@@ -1539,12 +1568,15 @@ def job_complete(job):
             actual_shots = int(actual_shots)
 
         # check for mismatch of requested shots and actual shots
-        if actual_shots != active_circuit["shots"]:
+        if "shots" in active_circuit and actual_shots != active_circuit["shots"]:
             print(
                 f'WARNING: requested shots not equal to actual shots: {active_circuit["shots"]} != {actual_shots} '
             )
 
             # allow processing to continue, but use the requested shot count
+            actual_shots = active_circuit["shots"]
+
+        if "shots" not in active_circuit:
             actual_shots = active_circuit["shots"]
 
         # obtain timing info from the results object
@@ -1581,9 +1613,12 @@ def job_complete(job):
         # <result> contains results from multiple circuits
         # DEVNOTE: This will need to change; currently the only case where we have multiple result counts
         # is when using randomly_compile; later, there will be other cases
-        if not use_sessions and type(result.get_counts()) == list:
+        if result.is_estimator_result():
+            expvals = result.get_expectation_values()
+            print("XXX", expvals)
+        else:  # Sampler result
             total_counts = dict()
-            for count in result.get_counts():
+            for count in result.get_counts(qc):
                 total_counts = dict(Counter(total_counts) + Counter(count))
 
             # make a copy of the result object so we can return a modified version
@@ -1614,6 +1649,7 @@ def job_complete(job):
                 f'ERROR: failed to execute result_handler for circuit {active_circuit["group"]} {active_circuit["circuit"]}'
             )
             print(f"... exception = {e}")
+            raise e
             if verbose:
                 print(traceback.format_exc())
 

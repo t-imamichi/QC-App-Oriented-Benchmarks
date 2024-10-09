@@ -10,6 +10,7 @@ import time
 import numpy as np
 from qiskit import QuantumCircuit, QuantumRegister
 from qiskit.circuit.library import PauliEvolutionGate
+from qiskit.primitives.containers.estimator_pub import EstimatorPub
 from qiskit.quantum_info import SparsePauliOp
 from qiskit.synthesis import LieTrotter
 
@@ -81,6 +82,8 @@ def VQEEnergy(n_spin_orbs, na, nb, circuit_id=0, method=1):
     # method 1, only compute the last term in the Hamiltonian
     if method == 1:
         # last term in Hamiltonian
+        op = qubit_op[1]
+        qc.name = str(op) + " " + str(np.real(op.coeffs))
         return qc, qubit_op[1]
     else:
         pass
@@ -435,7 +438,7 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
             metrics.store_metric(input_size, circuit_id, 'create_time', time.time() - ts)
 
             # collapse the sub-circuits used in this benchmark (for qiskit)
-            pub2 = (qc.decompose(), pub[1])
+            pub2 = EstimatorPub.coerce((qc.decompose(), pub[1]))
 
             # submit circuit for execution on target (simulator, cloud simulator, or hardware)
             # ex.submit_circuit(qc2, input_size, circuit_id, num_shots)
