@@ -46,7 +46,7 @@ def VQEEnergy(n_spin_orbs, na, nb, circuit_id=0, method=1):
     num_qubits = n_spin_orbs
 
     qr = QuantumRegister(num_qubits)
-    qc = QuantumCircuit(qr, name=f"vqe-ansatz({method})-{num_qubits}-{circuit_id}")
+    qc = QuantumCircuit(qr, name=f"vqe-ansatz({method}) {num_qubits} {circuit_id}")
 
     # initialize the HF state
     Hf = HartreeFock(num_qubits, na, nb)
@@ -83,54 +83,13 @@ def VQEEnergy(n_spin_orbs, na, nb, circuit_id=0, method=1):
     if method == 1:
         # last term in Hamiltonian
         op = qubit_op[1]
-        qc.name = str(op) + " " + str(np.real(op.coeffs))
+        qc.name = str(op.paulis[0]) + " " + str(np.real(op.coeffs)[0])
         return qc, qubit_op[1]
-    else:
-        pass
-        #return qc, qubit_op
 
-    # now we need to add the measurement parts to the circuit
-    # circuit list 
-    qc_list = []
-    diag = []
-    off_diag = []
     global normalization
-    normalization = 0.0
-
-    # add the first non-identity term
-    identity_qc = qc.copy()
-    identity_qc.measure_all()
-    qc_list.append(identity_qc) # add to circuit list
-    diag.append(qubit_op[1])
-    normalization += abs(qubit_op[1].coeffs[0]) # add to normalization factor
-    diag_coeff = abs(qubit_op[1].coeffs[0]) # add to coefficients of diagonal terms
-
-    # loop over rest of terms 
-    for index, p in enumerate(qubit_op[2:]):
-        
-        # get the circuit with expectation measurements
-        qc_with_mea, is_diag = ExpectationCircuit(qc, p, num_qubits)
-
-        # accumulate normalization 
-        normalization += abs(p.coeffs[0])
-
-        # add to circuit list if non-diagonal
-        if not is_diag:
-            qc_list.append(qc_with_mea)
-        else:
-            diag_coeff += abs(p.coeffs[0])
-
-        # diagonal term
-        if is_diag:
-            diag.append(p)
-        # off-diagonal term
-        else:
-            off_diag.append(p)
-
-    # modify the name of diagonal circuit
-    qc_list[0].name = qubit_op[1].to_list()[0][0] + " " + str(np.real(diag_coeff))
-    normalization /= len(qc_list)
-    return qc_list
+    normalization = sum(abs(p.coeffs[0]) for p in qubit_op[1:])
+    normalization /= len(qubit_op.group_commuting(qubit_wise=True))
+    return qc, list(qubit_op)
 
 # Function that constructs the circuit for a given cluster operator
 def ClusterOperatorCircuit(pauli_op, excitationIndex):
@@ -276,26 +235,24 @@ def ReadHamiltonian(nqubit):
 
 ## Analyze and print measured results
 ## Compute the quality of the result based on measured probability distribution for each state
-def analyze_and_print_result(qc, result, num_qubits, references, num_shots):
+def analyze_and_print_result(qc, result, num_qubits, references, _num_shots):
 
     # total circuit name (pauli string + coefficient)
     total_name = qc.name
 
-    # pauli string
     pauli_string = total_name.split()[0]
 
-    # get results counts
-    counts = result.get_counts(qc)
+    expval = result.get_expectation_values(qc)
 
     # get the correct measurement
     if (len(total_name.split()) == 2):
-        correct_dist = references[pauli_string]
+        ref = references[pauli_string]
     else:
         circuit_id = int(total_name.split()[2])
-        correct_dist = references[f"Qubits - {num_qubits} - {circuit_id}"]
+        ref = references[f"Qubits - {num_qubits} - {circuit_id}"]
 
     # compute fidelity
-    fidelity = metrics.polarization_fidelity(counts, correct_dist)
+    fidelity = metrics.accuracy_ratio_fidelity(expval, ref["exact"], ref["min"], ref["max"])
     
     if verbose:
         print(f"... fidelity = {fidelity}")
@@ -303,7 +260,6 @@ def analyze_and_print_result(qc, result, num_qubits, references, num_shots):
     # modify fidelity based on the coefficient (only for method 2)
     # Note: method 1 total name has 3 components, method 2 has only 2; 
     if (len(total_name.split()) == 2):
-           
         coefficient = abs(float(total_name.split()[1])) / normalization
         fidelity = {f : v * coefficient for f, v in fidelity.items()}
         if verbose:
@@ -341,6 +297,11 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
     if max_qubits < 4:
         print(f"Max number of qubits {max_qubits} is too low to run method {method} of VQE algorithm")
         return
+    
+    if backend_id == "statevector_estimator":
+        precision = 1.0 / np.sqrt(num_shots) * 0.01
+    else:
+        precision = 1.0 / np.sqrt(num_shots)
 
     # create context identifier
     if context is None: context = f"{benchmark_name} ({method}) Benchmark"
@@ -356,12 +317,12 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
         # load pre-computed data
         if len(qc.name.split()) == 2:
             filename = os.path.join(os.path.dirname(__file__),
-                    f'../_common/precalculated_data_{num_qubits}_qubit.json')
+                    f'../_common/estimator/precalculated_data_{num_qubits}_qubit_method2.json')
             with open(filename) as f:
                 references = json.load(f)
         else:
             filename = os.path.join(os.path.dirname(__file__),
-                    f'../_common/precalculated_data_{num_qubits}_qubit_method2.json')
+                    f'../_common/estimator/precalculated_data_{num_qubits}_qubit_method1.json')
             with open(filename) as f:
                 references = json.load(f)
 
@@ -420,7 +381,8 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
         elif method == 2:
 
             # construct all circuits
-            pub_list = VQEEnergy(num_qubits, na, nb, 0, method)
+            pub = VQEEnergy(num_qubits, na, nb, 0, method)
+            pub_list.append(pub)
 
         print(f"************\nExecuting [{len(pub_list)}] pubs with num_qubits = {num_qubits}")
 
@@ -438,11 +400,11 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
             metrics.store_metric(input_size, circuit_id, 'create_time', time.time() - ts)
 
             # collapse the sub-circuits used in this benchmark (for qiskit)
-            pub2 = EstimatorPub.coerce((qc.decompose(), pub[1]))
+            pub2 = EstimatorPub.coerce((qc, pub[1]))
 
             # submit circuit for execution on target (simulator, cloud simulator, or hardware)
             # ex.submit_circuit(qc2, input_size, circuit_id, num_shots)
-            ex.submit_pub(pub2, input_size, circuit_id, num_shots)
+            ex.submit_pub(pub2, input_size, circuit_id, precision)
 
         # Wait for some active circuits to complete; report metrics when group complete
         ex.throttle_execution(metrics.finalize_group)

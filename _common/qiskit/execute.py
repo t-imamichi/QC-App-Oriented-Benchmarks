@@ -160,7 +160,8 @@ class BenchmarkResult:
 
     def get_counts(self, qc=0):
         # TODO: need to refactor the caller of get_counts not to submit QuantumCircuit
-        # and use index instead to be compatible with PrimitiveResult
+        # and use index instead to be compatible with PrimitiveResult.
+        # `qc` is intentionally ignored.
         if self.is_estimator_result():
             raise RuntimeError(
                 "You cannot use `get_counts` because this result is Estimator result"
@@ -171,6 +172,9 @@ class BenchmarkResult:
         return counts
 
     def get_expectation_values(self, qc=0):
+        # TODO: need to refactor the caller of get_counts not to submit QuantumCircuit
+        # and use index instead to be compatible with PrimitiveResult.
+        # `qc` is intentionally ignored.
         if not self.is_estimator_result():
             raise RuntimeError(
                 "You cannot use `get_expectation_values` because this result is not Estimator result"
@@ -1615,7 +1619,6 @@ def job_complete(job):
         # is when using randomly_compile; later, there will be other cases
         if result.is_estimator_result():
             expvals = result.get_expectation_values()
-            print("XXX", expvals)
         else:  # Sampler result
             total_counts = dict()
             for count in result.get_counts(qc):
