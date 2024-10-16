@@ -78,17 +78,26 @@ def VQEEnergy(n_spin_orbs, na, nb, circuit_id=0, method=1):
 
         # add to ansatz
         qc.append(cluster_qc, [i for i in range(cluster_qc.num_qubits)])
-        
+
+    # save circuit
+    global QC_
+    if QC_ is None:
+        if qc.num_qubits < 7:
+            QC_ = qc
+
     # method 1, only compute the last term in the Hamiltonian
     if method == 1:
         # last term in Hamiltonian
         op = qubit_op[1]
-        qc.name = str(op.paulis[0]) + " " + str(np.real(op.coeffs)[0])
+        qc.metadata["method1"] = str(op.paulis[0]) + " " + str(np.real(op.coeffs)[0])
         return qc, qubit_op[1]
 
     global normalization
-    normalization = sum(abs(p.coeffs[0]) for p in qubit_op[1:])
+    # ignore the identity matrix qubit_op[0]
+    qubit_op = qubit_op[1:]
+    normalization = sum(abs(p.coeffs[0]) for p in qubit_op)
     normalization /= len(qubit_op.group_commuting(qubit_wise=True))
+    qc.metadata["method2"] = qubit_op
     return qc, list(qubit_op)
 
 # Function that constructs the circuit for a given cluster operator
@@ -236,39 +245,40 @@ def ReadHamiltonian(nqubit):
 ## Analyze and print measured results
 ## Compute the quality of the result based on measured probability distribution for each state
 def analyze_and_print_result(qc, result, num_qubits, references, _num_shots):
-
-    # total circuit name (pauli string + coefficient)
-    total_name = qc.name
-
-    pauli_string = total_name.split()[0]
-
-    expval = result.get_expectation_values(qc)
-
-    # get the correct measurement
-    if (len(total_name.split()) == 2):
-        ref = references[pauli_string]
-    else:
+    method = 0
+    if "method1" in qc.metadata:
+        method = 1
+        # total circuit name (pauli string + coefficient) for method 1
+        total_name = qc.metadata["method1"]
         circuit_id = int(total_name.split()[2])
         ref = references[f"Qubits - {num_qubits} - {circuit_id}"]
+    elif "method2" in qc.metadata:
+        method = 2
+        qubit_op: SparsePauliOp = qc.metadata["method2"]
+    else:
+        raise RuntimeError("Either method 1 or 2 should be chosen")
 
-    # compute fidelity
-    fidelity = metrics.accuracy_ratio_fidelity(expval, ref["exact"], ref["min"], ref["max"])
-    
-    if verbose:
-        print(f"... fidelity = {fidelity}")
+    expval = result.get_expectation_values(qc)
+    if method == 1:
+        fidelity = metrics.accuracy_ratio_fidelity(expval, ref["exact"], ref["min"], ref["max"])
+        if verbose:
+            print(f"... fidelity = {fidelity}")
+        return fidelity
 
     # modify fidelity based on the coefficient (only for method 2)
-    # Note: method 1 total name has 3 components, method 2 has only 2; 
-    if (len(total_name.split()) == 2):
-        coefficient = abs(float(total_name.split()[1])) / normalization
-        fidelity = {f : v * coefficient for f, v in fidelity.items()}
+    total_fidelity = {"fidelity": 0}
+    for val, (pauli, _) in zip(expval, qubit_op.to_list()):
+        ref = references[pauli]
+        fidelity = metrics.accuracy_ratio_fidelity(val, ref["exact"], ref["min"], ref["max"])
+        total_fidelity["fidelity"] += fidelity["fidelity"]
         if verbose:
-            print(f"... total_name={total_name}, coefficient={coefficient}, product_fidelity={fidelity}")
+            print(f"... {pauli=} {fidelity=}")
+    total_fidelity["fidelity"] /= qubit_op.size
     
     if verbose:
-        print(f"... total fidelity = {fidelity}")
-    
-    return fidelity
+        print(f"... {total_fidelity=}")
+
+    return total_fidelity
 
 ################ Benchmark Loop
 
@@ -299,7 +309,7 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
         return
     
     if backend_id == "statevector_estimator":
-        precision = 1.0 / np.sqrt(num_shots) * 0.01
+        precision = 1.0 / np.sqrt(num_shots) * 0.01  # TODO: update with 0
     else:
         precision = 1.0 / np.sqrt(num_shots)
 
@@ -315,23 +325,25 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
     def execution_handler(qc, result, num_qubits, type, num_shots):
 
         # load pre-computed data
-        if len(qc.name.split()) == 2:
+        if "method1" in qc.metadata:
+            filename = os.path.join(os.path.dirname(__file__),
+                    f'../_common/estimator/precalculated_data_{num_qubits}_qubit_method1.json')
+            with open(filename) as f:
+                references = json.load(f)
+        elif "method2" in qc.metadata:
             filename = os.path.join(os.path.dirname(__file__),
                     f'../_common/estimator/precalculated_data_{num_qubits}_qubit_method2.json')
             with open(filename) as f:
                 references = json.load(f)
         else:
-            filename = os.path.join(os.path.dirname(__file__),
-                    f'../_common/estimator/precalculated_data_{num_qubits}_qubit_method1.json')
-            with open(filename) as f:
-                references = json.load(f)
+            raise RuntimeError("Either method 1 or 2 should be chosen")
 
         fidelity = analyze_and_print_result(qc, result, num_qubits, references, num_shots)
 
-        if len(qc.name.split()) == 2:
-            metrics.store_metric(num_qubits, qc.name.split()[0], 'fidelity', fidelity)
-        else:
-            metrics.store_metric(num_qubits, qc.name.split()[2], 'fidelity', fidelity)
+        if "method1" in qc.metadata:
+            metrics.store_metric(num_qubits, qc.metadata["method1"].split()[2], 'fidelity', fidelity)
+        elif "method2" in qc.metadata:
+            metrics.store_metric(num_qubits, "method2", 'fidelity', fidelity)
 
     # Initialize execution module using the execution result handler above and specified backend_id
     ex.init_execution(execution_handler)
@@ -371,16 +383,16 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
             # loop over circuits
             for circuit_id in range(num_circuits):
 
-                # construct circuit 
+                # construct circuit and observable 
                 pub = VQEEnergy(num_qubits, na, nb, circuit_id, method)               
-                pub[0].name = pub[0].name + " " + str(circuit_id) 
+                pub[0].metadata["method1"] += " " + str(circuit_id) 
 
                 # add to list 
                 pub_list.append(pub)
         # method 2
         elif method == 2:
 
-            # construct all circuits
+            # construct circuit and all observables
             pub = VQEEnergy(num_qubits, na, nb, 0, method)
             pub_list.append(pub)
 
@@ -390,11 +402,10 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
             qc = pub[0]
 
             # get circuit id
-            print(qc.name)
-            if method == 1:
-                circuit_id = qc.name.split()[2]
+            if "method1" in qc.metadata:
+                circuit_id = qc.metadata["method1"].split()[2]
             else:
-                circuit_id = qc.name.split()[0]
+                circuit_id = "method2"
 
             # record creation time
             metrics.store_metric(input_size, circuit_id, 'create_time', time.time() - ts)
@@ -403,7 +414,6 @@ def run(min_qubits=4, max_qubits=8, skip_qubits=1,
             pub2 = EstimatorPub.coerce((qc, pub[1]))
 
             # submit circuit for execution on target (simulator, cloud simulator, or hardware)
-            # ex.submit_circuit(qc2, input_size, circuit_id, num_shots)
             ex.submit_pub(pub2, input_size, circuit_id, precision)
 
         # Wait for some active circuits to complete; report metrics when group complete
