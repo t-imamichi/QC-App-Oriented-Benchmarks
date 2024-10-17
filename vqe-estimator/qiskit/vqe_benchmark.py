@@ -373,9 +373,8 @@ def run(
         )
 
         if "method1" in qc.metadata:
-            metrics.store_metric(
-                num_qubits, qc.metadata["method1"].split()[2], "fidelity", fidelity
-            )
+            circuit_id = qc.metadata["method1"].split()[2]
+            metrics.store_metric(num_qubits, circuit_id, "fidelity", fidelity)
         elif "method2" in qc.metadata:
             metrics.store_metric(num_qubits, "method2", "fidelity", fidelity)
 

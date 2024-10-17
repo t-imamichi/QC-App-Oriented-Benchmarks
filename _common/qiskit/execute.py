@@ -1613,31 +1613,6 @@ def job_complete(job):
             logger.info("result_processor(...)")
             result = result_processor(result)
 
-        # The following computes the counts by summing them up, allowing for the case where
-        # <result> contains results from multiple circuits
-        # DEVNOTE: This will need to change; currently the only case where we have multiple result counts
-        # is when using randomly_compile; later, there will be other cases
-        if result.is_estimator_result():
-            expvals = result.get_expectation_values()
-        else:  # Sampler result
-            total_counts = dict()
-            for count in result.get_counts(qc):
-                total_counts = dict(Counter(total_counts) + Counter(count))
-
-            # make a copy of the result object so we can return a modified version
-            orig_result = result
-            result = copy.copy(result)
-
-            # replace the results array with an array containing only the first results object
-            # then populate other required fields
-            results = copy.copy(result.results[0])
-            results.header.name = active_circuit[
-                "qc"
-            ].name  # needed to identify the original circuit
-            results.shots = actual_shots
-            results.data.counts = total_counts
-            result.results = [results]
-
         try:
             result_handler(
                 active_circuit["qc"],
@@ -2036,7 +2011,11 @@ def check_jobs(completion_handler=None):
                 f'... pop and submit circuit - group={circuit["group"]} id={circuit["circuit"]} shots={circuit["shots"]}'
             )
 
-        execute_circuit(circuit)
+        global estimator
+        if estimator:
+            execute_pub(circuit)
+        else:
+            execute_circuit(circuit)
 
 
 # Test circuit execution
