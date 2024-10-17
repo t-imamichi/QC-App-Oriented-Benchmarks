@@ -77,12 +77,14 @@ def eigvals(op: SparsePauliOp) -> tuple[float, float]:
 
 def get_args():
     parser = ArgumentParser()
-    parser.add_argument("--output", "-o", help="Output directory name", type=str, default="../_common/estimator")
+    parser.add_argument(
+        "--output", "-o", help="Output directory name", type=str, default="../_common"
+    )
     parser.add_argument("--method", "-m", help="Method type", type=int, default=1)
     args = parser.parse_args()
     if not args.output:
         parser.print_usage()
-    return args 
+    return args
 
 
 def save_file(data: dict, filename: str) -> None:
@@ -104,7 +106,8 @@ def main():
         else:
             raise ValueError(f"Invalid method type ({args.method}). Should be 1 or 2.")
         filename = path.join(
-            args.output, f"precalculated_data_{num_qubits}_qubit_method{args.method}.json"
+            args.output,
+            f"precalculated_data_{num_qubits}_qubit_method{args.method}.json",
         )
         save_file(data, filename)
 
