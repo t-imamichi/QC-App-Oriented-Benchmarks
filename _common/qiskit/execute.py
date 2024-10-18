@@ -432,8 +432,9 @@ def set_execution_target(
                 instance = None
             print(f"... using Qiskit Runtime {channel=} {instance=}")
 
-            if " " in backend_id:
-                backend_name, primitive_name = backend_id.split(" ")
+            delimiter = "."
+            if delimiter in backend_id:
+                backend_name, primitive_name = backend_id.split(delimiter)
             else:
                 backend_name = backend_id
                 primitive_name = "sampler"
@@ -473,12 +474,12 @@ def set_execution_target(
             # set Sampler options
             if primitive_name == "sampler":
                 options_dict = exec_options.get("sampler_options", None)
-                options = SamplerOptions(**options_dict)
+                options = SamplerOptions(**options_dict if options_dict else {})
                 print(f"... execute using Sampler on {backend_name=} with {options=}")
                 sampler = SamplerV2(session if session else backend, options=options)
             else:
                 options_dict = exec_options.get("estimator_options", None)
-                options = EstimatorOptions(**options_dict)
+                options = EstimatorOptions(**options_dict if options_dict else {})
                 print(f"... execute using Estimator on {backend_name=} with {options=}")
                 estimator = EstimatorV2(
                     session if session else backend, options=options
