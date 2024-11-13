@@ -33,9 +33,8 @@ import logging
 import numpy as np
 
 from datetime import datetime, timedelta
-from qiskit import QuantumCircuit, transpile
+from qiskit import transpile
 from qiskit.providers.jobstatus import JobStatus
-from qiskit.primitives import StatevectorSampler
 from qiskit_aer import Aer, AerSimulator
 
 # Noise Model imports
@@ -317,11 +316,12 @@ def set_execution_target(backend_id='qasm_simulator',
             metrics.QV = this_noise.QV
             if verbose:
                 print(f"... setting noise model, QV={this_noise.QV} on {backend_id}")
-        
+
         # set Sampler options
+        from qiskit_ibm_runtime import SamplerOptions, SamplerV2
+
         options_dict = exec_options.get("sampler_options", None)
         options = SamplerOptions(**options_dict if options_dict else {})
-        
         sampler = SamplerV2(AerSimulator(noise_model=this_noise), options=options)
 
     # handle 'fake' backends here
@@ -395,12 +395,7 @@ def set_execution_target(backend_id='qasm_simulator',
             # need to import `Session` here to avoid the collision with
             # `azure.quantum.job.session.Session`
             
-            from qiskit_ibm_runtime import (
-                QiskitRuntimeService,
-                SamplerOptions,
-                SamplerV2,
-                Session
-                )
+            from qiskit_ibm_runtime import QiskitRuntimeService, Session
             
             if not use_ibm_quantum_platform:
                 channel = "ibm_cloud"
