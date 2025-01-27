@@ -76,6 +76,9 @@ session_count = 0
 session = None
 sampler = None
 
+# M3 mitigation
+m3_mitigation = {}
+
 # Use the IBM Quantum Platform system; default is to use the IBM Cloud
 use_ibm_quantum_platform = False
 
@@ -697,7 +700,13 @@ def execute_circuit(circuit):
                 #*************************************
                 # perform circuit execution on backend
                 logger.info(f'Running trans_qc, shots={shots}')
-                st = time.time() 
+                st = time.time()
+                
+                from mthree import M3Mitigation
+                from mthree.utils import final_measurement_mapping
+                mit = M3Mitigation(backend)
+                qubits = final_measurement_mapping(trans_qc)
+                mit.cals_from_system(qubits, runtime_mode=session)
 
                 if sampler:
                     # set job tags if SamplerV2 on IBM Quantum Platform
@@ -708,6 +717,8 @@ def execute_circuit(circuit):
                     job = sampler.run([trans_qc], shots=shots)
                 else:
                     job = backend.run(trans_qc, shots=shots, **backend_exec_options_copy)
+
+                m3_mitigation[job] = (mit, qubits)
 
                 logger.info(f'Finished Running trans_qc - {round(time.time() - st, 5)} (ms)')
                 if verbose_time: print(f"  *** qiskit.run() time = {round(time.time() - st, 5)}")
@@ -1159,6 +1170,9 @@ def job_complete(job):
         if not use_sessions and type(result.get_counts()) == list:
             total_counts = dict()
             for count in result.get_counts():
+                if job in m3_mitigation:
+                    mit, qubits = m3_mitigation[job]
+                    count = mit.apply_correction(count, qubits)
                 total_counts = dict(Counter(total_counts) + Counter(count))
                 
             # make a copy of the result object so we can return a modified version
