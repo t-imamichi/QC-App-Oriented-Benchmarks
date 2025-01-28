@@ -77,6 +77,7 @@ session = None
 sampler = None
 
 # M3 mitigation
+use_m3 = False
 m3_mitigation = {}
 
 # Use the IBM Quantum Platform system; default is to use the IBM Cloud
@@ -262,6 +263,7 @@ def set_execution_target(backend_id='qasm_simulator',
     global use_ibm_quantum_platform
     global use_sessions
     global session_count
+    global use_m3
     authentication_error_msg = "No credentials for {0} backend found. Using the simulator instead."
 
     # default to qasm_simulator if None passed in
@@ -426,6 +428,9 @@ def set_execution_target(backend_id='qasm_simulator',
                     print("... using batch")
                 if session is None:
                     session = Batch(backend=backend)
+            
+            # set M3 options
+            use_m3 = exec_options.get("use_m3", False)
 
             # set Sampler options
             options_dict = exec_options.get("sampler_options", None)
@@ -702,11 +707,13 @@ def execute_circuit(circuit):
                 logger.info(f'Running trans_qc, shots={shots}')
                 st = time.time()
                 
-                from mthree import M3Mitigation
-                from mthree.utils import final_measurement_mapping
-                mit = M3Mitigation(backend)
-                qubits = final_measurement_mapping(trans_qc)
-                mit.cals_from_system(qubits, runtime_mode=session)
+                if use_m3:
+                    from mthree import M3Mitigation
+                    from mthree.utils import final_measurement_mapping
+                    mit = M3Mitigation(backend)
+                    qubits = final_measurement_mapping(trans_qc)
+                    mit.cals_from_system(qubits, runtime_mode=session)
+                    logger.info("calibrating M3")
 
                 if sampler:
                     # set job tags if SamplerV2 on IBM Quantum Platform
@@ -718,7 +725,8 @@ def execute_circuit(circuit):
                 else:
                     job = backend.run(trans_qc, shots=shots, **backend_exec_options_copy)
 
-                m3_mitigation[job] = (mit, qubits)
+                if use_m3:
+                    m3_mitigation[job] = (mit, qubits)
 
                 logger.info(f'Finished Running trans_qc - {round(time.time() - st, 5)} (ms)')
                 if verbose_time: print(f"  *** qiskit.run() time = {round(time.time() - st, 5)}")
