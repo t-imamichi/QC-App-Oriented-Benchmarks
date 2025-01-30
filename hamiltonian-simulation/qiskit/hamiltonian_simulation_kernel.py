@@ -43,7 +43,7 @@ class HamiltonianKernel(object):
     QC2D_ = None        # Mirror Circuit
     QCRS_ = None        # Resultant Pauli
     
-    def __init__(self, n_spins, K, t, hamiltonian, w, hx, hz, use_XX_YY_ZZ_gates, method, random_pauli_flag, init_state):
+    def __init__(self, n_spins, K, t, hamiltonian, w, hx, hz, use_XX_YY_ZZ_gates, method, random_pauli_flag, init_state, use_pauli_evolution):
         self.n_spins = n_spins
         self.K = K
         self.t = t
@@ -53,6 +53,7 @@ class HamiltonianKernel(object):
         self.h_x = hx
         self.h_z = hz   
         self.use_XX_YY_ZZ_gates = use_XX_YY_ZZ_gates
+        self.use_pauli_evolution = use_pauli_evolution
         self.random_pauli_flag = random_pauli_flag
         self.method = method
         
@@ -103,7 +104,7 @@ class HamiltonianKernel(object):
             HamiltonianKernel.QC2D_ = inverse_circuit
 
         # Collapse the sub-circuits used in this benchmark (for Qiskit)
-        qc2 = self.qc.decompose().decompose()      
+        qc2 = self.qc.decompose()
 
         return qc2
 
@@ -198,7 +199,33 @@ class HamiltonianKernel(object):
 class HeisenbergHamiltonianKernel(HamiltonianKernel):
 
     #apply Heisenberg hamiltonian.
+    def create_hamiltonian_pauli_evolution(self) -> QuantumCircuit:
+        lst = []
+        qr = QuantumRegister(self.n_spins)
+        qc = QuantumCircuit(qr, name="Heisenberg")
+        for i in range(self.n_spins):
+            lst.append(("X", [i], self.w * self.h_x[i]))
+            lst.append(("Z", [i], self.w * self.h_z[i]))
+        for j in range(2):
+            for i in range(j % 2, self.n_spins - 1, 2):
+                ii = (i + 1) % self.n_spins
+                lst.append(("XX", [i, ii], pi / 2))
+                lst.append(("YY", [i, ii], pi / 2))
+                lst.append(("ZZ", [i, ii], pi / 2))
+
+        from qiskit.quantum_info import SparsePauliOp
+        from qiskit.circuit.library import PauliEvolutionGate
+        from qiskit.synthesis import LieTrotter
+        op = SparsePauliOp.from_sparse_list(lst, num_qubits=self.n_spins)
+        evo = PauliEvolutionGate(op, self.tau * self.K, synthesis=LieTrotter(reps=self.K))
+        qc = QuantumCircuit(self.n_spins)
+        qc.append(evo, qc.qubits)
+        return qc
+
+    #apply Heisenberg hamiltonian.
     def create_hamiltonian(self) -> QuantumCircuit:
+        if self.use_pauli_evolution:
+            return self.create_hamiltonian_pauli_evolution()
         qr = QuantumRegister(self.n_spins)
         qc = QuantumCircuit(qr, name="Heisenberg")
         for k in range(self.K):
@@ -210,18 +237,13 @@ class HeisenbergHamiltonianKernel(HamiltonianKernel):
                 for j in range(2):
                     for i in range(j % 2, self.n_spins - 1, 2):
                         qc.append(xx_gate(self.tau).to_instruction(), [qr[i], qr[(i + 1) % self.n_spins]])
-                for j in range(2):
-                    for i in range(j % 2, self.n_spins - 1, 2):
                         qc.append(yy_gate(self.tau).to_instruction(), [qr[i], qr[(i + 1) % self.n_spins]])
-                for j in range(2):
-                    for i in range(j % 2, self.n_spins - 1, 2):
                         qc.append(zz_gate(self.tau).to_instruction(), [qr[i], qr[(i + 1) % self.n_spins]])
             else:
                 for j in range(2):
                     for i in range(j % 2, self.n_spins - 1, 2):
                         qc.append(xxyyzz_opt_gate(self.tau).to_instruction(), [qr[i], qr[(i + 1) % self.n_spins]])
             qc.barrier()
-  
         return qc
 
     #apply inverse of the hamiltonian to simulate negative time evolution.
@@ -521,9 +543,9 @@ def xxyyzz_opt_gate(tau: float) -> QuantumCircuit:
     qc.rz(pi / 2, qr[1])
     qc.cx(qr[1], qr[0])
     qc.rz(pi * gamma - pi / 2, qr[0])
-    qc.ry(pi / 2 - pi * alpha, qr[1])
+    qc.ry(-pi / 2 + pi * alpha, qr[1])
     qc.cx(qr[0], qr[1])
-    qc.ry(pi * beta - pi / 2, qr[1])
+    qc.ry(-pi * beta + pi / 2, qr[1])
     qc.cx(qr[1], qr[0])
     qc.rz(-pi / 2, qr[0])
 
