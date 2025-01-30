@@ -237,13 +237,18 @@ class HeisenbergHamiltonianKernel(HamiltonianKernel):
                 for j in range(2):
                     for i in range(j % 2, self.n_spins - 1, 2):
                         qc.append(xx_gate(self.tau).to_instruction(), [qr[i], qr[(i + 1) % self.n_spins]])
+                for j in range(2):
+                    for i in range(j % 2, self.n_spins - 1, 2):
                         qc.append(yy_gate(self.tau).to_instruction(), [qr[i], qr[(i + 1) % self.n_spins]])
+                for j in range(2):
+                    for i in range(j % 2, self.n_spins - 1, 2):
                         qc.append(zz_gate(self.tau).to_instruction(), [qr[i], qr[(i + 1) % self.n_spins]])
             else:
                 for j in range(2):
                     for i in range(j % 2, self.n_spins - 1, 2):
                         qc.append(xxyyzz_opt_gate(self.tau).to_instruction(), [qr[i], qr[(i + 1) % self.n_spins]])
             qc.barrier()
+  
         return qc
 
     #apply inverse of the hamiltonian to simulate negative time evolution.
@@ -543,9 +548,9 @@ def xxyyzz_opt_gate(tau: float) -> QuantumCircuit:
     qc.rz(pi / 2, qr[1])
     qc.cx(qr[1], qr[0])
     qc.rz(pi * gamma - pi / 2, qr[0])
-    qc.ry(-pi / 2 + pi * alpha, qr[1])
+    qc.ry(pi / 2 - pi * alpha, qr[1])
     qc.cx(qr[0], qr[1])
-    qc.ry(-pi * beta + pi / 2, qr[1])
+    qc.ry(pi * beta - pi / 2, qr[1])
     qc.cx(qr[1], qr[0])
     qc.rz(-pi / 2, qr[0])
 
