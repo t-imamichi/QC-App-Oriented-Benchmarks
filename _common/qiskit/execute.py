@@ -98,6 +98,10 @@ backend = Aer.get_backend("qasm_simulator")
 # Execution options, passed to transpile method
 backend_exec_options = None
 
+# Target
+target = None
+use_realtime_calibration = False
+
 # Create array of batched circuits and a dict of active circuits
 batched_circuits = []
 active_circuits = {}
@@ -264,6 +268,7 @@ def set_execution_target(backend_id='qasm_simulator',
     global use_sessions
     global session_count
     global use_m3
+    global use_realtime_calibration
     authentication_error_msg = "No credentials for {0} backend found. Using the simulator instead."
 
     # default to qasm_simulator if None passed in
@@ -431,6 +436,9 @@ def set_execution_target(backend_id='qasm_simulator',
             
             # set M3 options
             use_m3 = exec_options.get("use_m3", False)
+            
+            # set real-time qubit selection options
+            use_realtime_calibration = exec_options.get("use_realtime_calibration", False)
 
             # set Sampler options
             options_dict = exec_options.get("sampler_options", None)
@@ -673,18 +681,28 @@ def execute_circuit(circuit):
             
             #************************************************
             # Initiate execution for all other backends and noiseless simulator
-            else:            
-     
+            else:
+                global target
+                print(f"{target=} {backend=} {session=}")
+                if use_realtime_calibration and target is None:
+                    logger.info("Calibrating target for qubit selection")
+                    try:
+                        target = calibrate_target(backend, session)
+                    except Exception as ex:
+                        print(traceback.format_exc())
+                        raise ex
+
                 # if set, transpile many times and pick shortest circuit
                 # DEVNOTE: this does not handle parameters yet, or optimizations
                 if transpile_attempt_count:
                     trans_qc = transpile_multiple_times(circuit["qc"], circuit["params"], backend,
-                            transpile_attempt_count, 
+                            target, transpile_attempt_count, 
                             optimization_level=None, layout_method=None, routing_method=None)
                             
                 # transpile and bind circuit with parameters; use cache if flagged                       
                 else:
                     trans_qc = transpile_and_bind_circuit(circuit["qc"], circuit["params"], backend,
+                            target=target,
                             optimization_level=optimization_level,
                             layout_method=layout_method,
                             routing_method=routing_method)
@@ -714,7 +732,7 @@ def execute_circuit(circuit):
                     qubits = final_measurement_mapping(trans_qc)
                     mit.cals_from_system(qubits, runtime_mode=session)
                     logger.info("calibrating M3")
-
+                
                 if sampler:
                     # set job tags if SamplerV2 on IBM Quantum Platform
                     if hasattr(sampler, "options"):
@@ -866,12 +884,12 @@ def transpile_for_metrics(qc):
     # use either the backend or one of the basis gate sets
     if basis_selector == 0:
         logger.info(f"Start transpile with {basis_selector = }")
-        qc = transpile(qc, backend, seed_transpiler=0)
+        qc = transpile(qc, backend, target=target, seed_transpiler=0)
         logger.info(f"End transpile with {basis_selector = }")
     else:
         basis_gates = basis_gates_array[basis_selector]
         logger.info("Start transpile with basis_selector != 0")
-        qc = transpile(qc, basis_gates=basis_gates, seed_transpiler=0)
+        qc = transpile(qc, target=target, basis_gates=basis_gates, seed_transpiler=0)
         logger.info("End transpile with basis_selector != 0")
     
     #print(qc)
@@ -903,7 +921,7 @@ def transpile_for_metrics(qc):
 # Cache the transpiled circuit, and use it if do_transpile_for_execute not set
 # DEVNOTE: this approach does not permit passing of untranspiled circuit through
 # DEVNOTE: currently this only caches a single circuit
-def transpile_and_bind_circuit(circuit, params, backend, basis_gates=None,
+def transpile_and_bind_circuit(circuit, params, backend, target, basis_gates=None,
                 optimization_level=None, layout_method=None, routing_method=None,
                 seed_transpiler=None):
                 
@@ -912,7 +930,7 @@ def transpile_and_bind_circuit(circuit, params, backend, basis_gates=None,
         
     if do_transpile_for_execute:
         logger.info('transpiling for execute')
-        trans_qc = transpile(circuit, backend, basis_gates=basis_gates,
+        trans_qc = transpile(circuit, backend, target=target, basis_gates=basis_gates,
                 optimization_level=optimization_level, layout_method=layout_method, routing_method=routing_method,
                 seed_transpiler=seed_transpiler)
         
@@ -955,7 +973,7 @@ def transpile_and_bind_circuit(circuit, params, backend, basis_gates=None,
 
 # Transpile a circuit multiple times for optimal results
 # DEVNOTE: this does not handle parameters yet
-def transpile_multiple_times(circuit, params, backend, transpile_attempt_count, 
+def transpile_multiple_times(circuit, params, backend, target, transpile_attempt_count, 
                 optimization_level=None, layout_method=None, routing_method=None):
     
     logger.info(f"transpile_multiple_times({transpile_attempt_count})")
@@ -965,7 +983,8 @@ def transpile_multiple_times(circuit, params, backend, transpile_attempt_count,
     trans_qc_list = [
         transpile(
             circuit, 
-            backend, 
+            backend,
+            target=target,
             optimization_level=optimization_level,
             layout_method=layout_method,
             routing_method=routing_method,
@@ -1625,4 +1644,87 @@ def job_wait_for_completion(job):
         print("\n... circuit execution failed.")
 
 
+def calibrate_target(backend, session):
+    """
+    Calibrate the target properties of a quantum backend.
 
+    Parameters:
+    backend (qiskit.providers.BackendV2): The quantum backend to calibrate.
+    session (qiskit_ibm_runtime.Session): The IBM Quantum Runtime session.
+
+    Returns:
+    qiskit.target.Target: The calibrated target properties of the backend.
+    """
+    import rustworkx
+    from collections import defaultdict
+    from qiskit.transpiler import InstructionProperties
+    from qiskit_experiments.library import T1, T2Hahn, LocalReadoutError, StandardRB
+    from qiskit_experiments.framework import BatchExperiment, ParallelExperiment
+    from qiskit_ibm_runtime import SamplerV2
+
+    qubits = list(range(backend.num_qubits))
+    coupling_graph = backend.coupling_map.graph.to_undirected(multigraph=False)
+
+    # Get layered coupling map
+    edge_coloring = rustworkx.graph_bipartite_edge_color(coupling_graph)
+    layered_coupling_map = defaultdict(list)
+    for edge_idx, color in edge_coloring.items():
+        layered_coupling_map[color].append(coupling_graph.get_edge_endpoints_by_index(edge_idx))
+    layered_coupling_map = [sorted(layered_coupling_map[i]) for i in sorted(layered_coupling_map.keys())]
+
+    flattened_layered_coupling_map = []
+    for layer in layered_coupling_map:
+        flattened_layered_coupling_map += layer
+    
+    t1_exp = ParallelExperiment([T1(physical_qubits=[qubit], delays=np.linspace(1e-6, 2*backend.properties().t1(qubit), 5, endpoint=True)) for qubit in qubits], backend, analysis=None)
+    t2_exp = ParallelExperiment([T2Hahn(physical_qubits=[qubit], delays=np.linspace(1e-6, 2*backend.properties().t2(qubit), 5, endpoint=True)) for qubit in qubits], backend, analysis=None)
+    readout_exp = LocalReadoutError(qubits)
+    singleq_rb_exp = ParallelExperiment([StandardRB(physical_qubits=[qubit], lengths=[10, 100, 500], num_samples=10) for qubit in qubits], backend, analysis=None)
+    twoq_rb_exp_batched = BatchExperiment([ParallelExperiment([StandardRB(physical_qubits=pair, lengths=[10, 50, 100], num_samples=10) for pair in layer], backend, analysis=None) for layer in layered_coupling_map], backend, flatten_results=True, analysis=None)
+    batches = [t1_exp, t2_exp, readout_exp, singleq_rb_exp, twoq_rb_exp_batched]
+    batches_exp = BatchExperiment(batches, backend)
+    run_options = {'shots': 1000, 'dynamic': False}
+
+    sampler = SamplerV2(session if session else backend)
+
+    # Run characterization experiments
+    batches_exp_data = batches_exp.run(sampler=sampler, **run_options).block_for_results()
+
+    EPG_sx_result_list = batches_exp_data.analysis_results('EPG_sx')
+    EPG_sx_result_q_indices = [result.device_components.index for result in EPG_sx_result_list ]
+    EPG_x_result_list = batches_exp_data.analysis_results('EPG_x')
+    EPG_x_result_q_indices = [result.device_components.index for result in EPG_x_result_list ]
+    T1_result_list =  batches_exp_data.analysis_results('T1')
+    T1_result_q_indices = [result.device_components.index for result in T1_result_list ]
+    T2_result_list = batches_exp_data.analysis_results('T2')
+    T2_result_q_indices = [result.device_components.index for result in T2_result_list ]
+    Readout_result_list = batches_exp_data.analysis_results('Local Readout Mitigator')
+    EPG_ecr_result_list = batches_exp_data.analysis_results('EPG_ecr')
+
+    # Update target properties
+    target = copy.deepcopy(backend.target)
+    for i in range(target.num_qubits-1):
+        qarg = (i,)
+
+        if qarg in EPG_sx_result_q_indices:
+            target.update_instruction_properties(instruction='sx', qargs=qarg, properties=InstructionProperties(error=EPG_sx_result_list[i].value.nominal_value))
+        if qarg in EPG_x_result_q_indices:
+            target.update_instruction_properties(instruction='x', qargs=qarg, properties=InstructionProperties(error=EPG_x_result_list[i].value.nominal_value))
+            
+        err_mat = Readout_result_list.value.assignment_matrix(i)
+        readout_assignment_error = (err_mat[0, 1] + err_mat[1, 0]) / 2  # average readout error
+        target.update_instruction_properties(instruction='measure', qargs=qarg, properties=InstructionProperties(error=readout_assignment_error))
+
+        if qarg in T1_result_q_indices:
+            target.qubit_properties[i].t1 = T1_result_list[i].value.nominal_value
+        if qarg in T2_result_q_indices:
+            target.qubit_properties[i].t2 = T2_result_list[i].value.nominal_value
+
+    for pair_idx, pair in enumerate(flattened_layered_coupling_map):
+        qarg = tuple(pair)
+        try:
+            target.update_instruction_properties(instruction='ecr', qargs=qarg, properties=InstructionProperties(error=EPG_ecr_result_list[pair_idx].value.nominal_value))
+        except:
+            target.update_instruction_properties(instruction='ecr', qargs=qarg[::-1], properties=InstructionProperties(error=EPG_ecr_result_list[pair_idx].value.nominal_value))
+    
+    return target
