@@ -415,6 +415,18 @@ def set_execution_target(backend_id='qasm_simulator',
 
             # DEVNOTE: here we assume if the sessions flag is set, we use Sampler
             # however, we may want to add a use_sampler option so that we can separate these
+
+            # set real-time qubit selection options
+            use_realtime_calibration = exec_options.get("use_realtime_calibration", False)
+
+            global target
+            if use_realtime_calibration and target is None:
+                print("... calibrating target for qubit selection")
+                try:
+                    target = calibrate_target(backend)
+                except Exception as ex:
+                    print(traceback.format_exc())
+                    raise ex
             
             # set use_sessions if provided by user - NOTE: this will modify the global setting
             this_use_sessions = exec_options.get("use_sessions", None)
@@ -437,9 +449,6 @@ def set_execution_target(backend_id='qasm_simulator',
             # set M3 options
             use_m3 = exec_options.get("use_m3", False)
             
-            # set real-time qubit selection options
-            use_realtime_calibration = exec_options.get("use_realtime_calibration", False)
-
             # set Sampler options
             options_dict = exec_options.get("sampler_options", None)
             options = SamplerOptions(**options_dict if options_dict else {})
@@ -682,16 +691,6 @@ def execute_circuit(circuit):
             #************************************************
             # Initiate execution for all other backends and noiseless simulator
             else:
-                global target
-                print(f"{target=} {backend=} {session=}")
-                if use_realtime_calibration and target is None:
-                    logger.info("Calibrating target for qubit selection")
-                    try:
-                        target = calibrate_target(backend, session)
-                    except Exception as ex:
-                        print(traceback.format_exc())
-                        raise ex
-
                 # if set, transpile many times and pick shortest circuit
                 # DEVNOTE: this does not handle parameters yet, or optimizations
                 if transpile_attempt_count:
@@ -1644,7 +1643,7 @@ def job_wait_for_completion(job):
         print("\n... circuit execution failed.")
 
 
-def calibrate_target(backend, session):
+def calibrate_target(backend):
     """
     Calibrate the target properties of a quantum backend.
 
@@ -1653,7 +1652,7 @@ def calibrate_target(backend, session):
     session (qiskit_ibm_runtime.Session): The IBM Quantum Runtime session.
 
     Returns:
-    qiskit.target.Target: The calibrated target properties of the backend.
+    qiskit.transpiler.Target: The calibrated target properties of the backend.
     """
     import rustworkx
     from collections import defaultdict
@@ -1685,7 +1684,8 @@ def calibrate_target(backend, session):
     batches_exp = BatchExperiment(batches, backend)
     run_options = {'shots': 1000, 'dynamic': False}
 
-    sampler = SamplerV2(session if session else backend)
+    # intentionally use backend to avoid timeout to generate large jobs for calibration
+    sampler = SamplerV2(backend)
 
     # Run characterization experiments
     batches_exp_data = batches_exp.run(sampler=sampler, **run_options).block_for_results()
@@ -1699,7 +1699,13 @@ def calibrate_target(backend, session):
     T2_result_list = batches_exp_data.analysis_results('T2')
     T2_result_q_indices = [result.device_components.index for result in T2_result_list ]
     Readout_result_list = batches_exp_data.analysis_results('Local Readout Mitigator')
-    EPG_ecr_result_list = batches_exp_data.analysis_results('EPG_ecr')
+    if 'ecr' in backend.operation_names:
+        instruction_2q = 'ecr'
+    elif 'cz' in backend.operation_names:
+        instruction_2q = 'cz'
+    else:
+        raise RuntimeError('Only ecr and cz are supported 2q instructions')
+    EPG_2q_result_list = batches_exp_data.analysis_results(f'EPG_{instruction_2q}')
 
     # Update target properties
     target = copy.deepcopy(backend.target)
@@ -1723,8 +1729,8 @@ def calibrate_target(backend, session):
     for pair_idx, pair in enumerate(flattened_layered_coupling_map):
         qarg = tuple(pair)
         try:
-            target.update_instruction_properties(instruction='ecr', qargs=qarg, properties=InstructionProperties(error=EPG_ecr_result_list[pair_idx].value.nominal_value))
-        except:
-            target.update_instruction_properties(instruction='ecr', qargs=qarg[::-1], properties=InstructionProperties(error=EPG_ecr_result_list[pair_idx].value.nominal_value))
+            target.update_instruction_properties(instruction=instruction_2q, qargs=qarg, properties=InstructionProperties(error=EPG_2q_result_list[pair_idx].value.nominal_value))
+        except Exception:
+            target.update_instruction_properties(instruction=instruction_2q, qargs=qarg[::-1], properties=InstructionProperties(error=EPG_2q_result_list[pair_idx].value.nominal_value))
     
     return target
