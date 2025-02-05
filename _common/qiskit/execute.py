@@ -1656,7 +1656,7 @@ def calibrate_target(backend):
     """
     import rustworkx
     from collections import defaultdict
-    from qiskit.transpiler import InstructionProperties
+    from qiskit.transpiler import InstructionProperties, CouplingMap, Target
     from qiskit_experiments.library import T1, T2Hahn, LocalReadoutError, StandardRB
     from qiskit_experiments.framework import BatchExperiment, ParallelExperiment
     from qiskit_ibm_runtime import SamplerV2
@@ -1685,7 +1685,8 @@ def calibrate_target(backend):
     run_options = {'shots': 1000, 'dynamic': False}
 
     # intentionally use backend to avoid timeout to generate large jobs for calibration
-    sampler = SamplerV2(backend)
+    options = {"experimental": {"execution_path": "gen3-turbo"}}
+    sampler = SamplerV2(backend, options=options)
 
     # Run characterization experiments
     batches_exp_data = batches_exp.run(sampler=sampler, **run_options).block_for_results()
@@ -1732,5 +1733,41 @@ def calibrate_target(backend):
             target.update_instruction_properties(instruction=instruction_2q, qargs=qarg, properties=InstructionProperties(error=EPG_2q_result_list[pair_idx].value.nominal_value))
         except Exception:
             target.update_instruction_properties(instruction=instruction_2q, qargs=qarg[::-1], properties=InstructionProperties(error=EPG_2q_result_list[pair_idx].value.nominal_value))
-    
-    return target
+
+    cmap = target.build_coupling_map(filter_idle_qubits=True)
+    cmap_list = list(cmap.get_edges())
+
+    max_meas_err = 0.06
+    min_t2 = 20
+    max_twoq_err = 0.02
+
+    # Remove qubits with bad measurement or t2
+    cust_cmap_list = copy.deepcopy(cmap_list)
+    for q in range(target.num_qubits):
+        meas_err = target['measure'][(q,)].error
+        t2 = target.qubit_properties[q].t2 * 1e6
+        if meas_err > max_meas_err or t2 < min_t2:
+            for q_pair in cmap_list:
+                if q in q_pair:
+                    try:
+                        cust_cmap_list.remove(q_pair)
+                    except Exception:
+                        continue
+
+    # Remove qubits with bad cz or t2
+    for q in cmap_list:
+        twoq_gate_err = target[instruction_2q][q].error
+        if twoq_gate_err > max_twoq_err:
+            for q_pair in cmap_list:
+                if q == q_pair:
+                    try:
+                        cust_cmap_list.remove(q_pair)
+                    except Exception:
+                        continue
+
+    custom_cmap = CouplingMap(cust_cmap_list) 
+    custom_target = Target.from_configuration(
+        basis_gates = backend.configuration().basis_gates, # or whatever new set of gates
+        coupling_map = custom_cmap,
+    )    
+    return custom_target
