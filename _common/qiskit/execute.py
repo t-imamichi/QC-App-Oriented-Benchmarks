@@ -1734,8 +1734,6 @@ def calibrate_target(backend):
         except Exception:
             target.update_instruction_properties(instruction=instruction_2q, qargs=qarg[::-1], properties=InstructionProperties(error=EPG_2q_result_list[pair_idx].value.nominal_value))
 
-    return target
-
     # Remove bad qubits
     cmap = target.build_coupling_map(filter_idle_qubits=True)
     cmap_list = list(cmap.get_edges())
@@ -1770,7 +1768,7 @@ def calibrate_target(backend):
 
     custom_cmap = CouplingMap(cust_cmap_list) 
     custom_target = Target.from_configuration(
-        basis_gates = backend.configuration().basis_gates, # or whatever new set of gates
+        basis_gates = backend.configuration().basis_gates + ['measure'], # or whatever new set of gates
         coupling_map = custom_cmap,
-    )    
+    )
     return custom_target
