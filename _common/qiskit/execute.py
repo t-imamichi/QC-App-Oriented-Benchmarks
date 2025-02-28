@@ -416,18 +416,6 @@ def set_execution_target(backend_id='qasm_simulator',
             # DEVNOTE: here we assume if the sessions flag is set, we use Sampler
             # however, we may want to add a use_sampler option so that we can separate these
 
-            # set real-time qubit selection options
-            use_realtime_calibration = exec_options.get("use_realtime_calibration", False)
-
-            global target
-            if use_realtime_calibration and target is None:
-                print("... calibrating target for qubit selection")
-                try:
-                    target = calibrate_target(backend)
-                except Exception as ex:
-                    print(traceback.format_exc())
-                    raise ex
-            
             # set use_sessions if provided by user - NOTE: this will modify the global setting
             this_use_sessions = exec_options.get("use_sessions", None)
             if this_use_sessions != None:
@@ -445,6 +433,18 @@ def set_execution_target(backend_id='qasm_simulator',
                     print("... using batch")
                 if session is None:
                     session = Batch(backend=backend)
+            
+            # set real-time qubit selection options
+            use_realtime_calibration = exec_options.get("use_realtime_calibration", False)
+
+            global target
+            if use_realtime_calibration and target is None:
+                print("... calibrating target for qubit selection")
+                try:
+                    target = calibrate_target(backend, session)
+                except Exception as ex:
+                    print(traceback.format_exc())
+                    raise ex
             
             # set M3 options
             use_m3 = exec_options.get("use_m3", False)
@@ -1643,7 +1643,7 @@ def job_wait_for_completion(job):
         print("\n... circuit execution failed.")
 
 
-def calibrate_target(backend):
+def calibrate_target(backend, session):
     """
     Calibrate the target properties of a quantum backend.
 
@@ -1686,10 +1686,15 @@ def calibrate_target(backend):
 
     # intentionally use backend to avoid timeout to generate large jobs for calibration
     options = {"experimental": {"execution_path": "gen3-turbo"}}
-    sampler = SamplerV2(backend, options=options)
+    sampler = SamplerV2(session, options=options)
+    sampler.options.environment.job_tags = ["realtime qubit selection"]
 
     # Run characterization experiments
+    # Note: Disable parallel temporarily to avoid huge overhead on Linux
+    # Should use `should_run_in_parallel.override` for Qiskit 2.0 or newer
+    os.environ["QISKIT_IN_PARALLEL"] = "TRUE"
     batches_exp_data = batches_exp.run(sampler=sampler, **run_options).block_for_results()
+    os.environ["QISKIT_IN_PARALLEL"] = "FALSE"
 
     EPG_sx_result_list = batches_exp_data.analysis_results('EPG_sx')
     EPG_sx_result_q_indices = [result.device_components.index for result in EPG_sx_result_list ]
