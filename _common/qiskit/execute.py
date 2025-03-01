@@ -154,15 +154,21 @@ class BenchmarkResult:
         super().__init__()
         self.qiskit_result = qiskit_result
         self.metadata = qiskit_result.metadata
+        self._counts = None
+
+    def set_counts(self, counts):
+        self._counts = counts
 
     def get_counts(self, qc=0):
         # TODO: need to refactor the caller of get_counts not to submit QuantumCircuit
         # and use index instead to be compatible with PrimitiveResult.
         # `qc` is intentionally ignored.
+        if self._counts:
+            return self._counts
         qc_index = 0 # this should point to the index of the circuit in a pub
         bitvals = next(iter(self.qiskit_result[qc_index].data.values()))
-        counts = bitvals.get_counts()
-        return counts
+        self._counts = bitvals.get_counts()
+        return self._counts
 
 # Special Job object class to hold job information for custom executors
 class Job:
@@ -274,6 +280,9 @@ def set_execution_target(backend_id='qasm_simulator',
     # default to qasm_simulator if None passed in
     if backend_id == None:
         backend_id="qasm_simulator"
+
+    # set M3 options
+    use_m3 = exec_options.get("use_m3", False)
         
     # if a custom provider backend is given, use it ...
     # Note: in this case, the backend_id is an identifier that shows up in plots
@@ -321,6 +330,8 @@ def set_execution_target(backend_id='qasm_simulator',
             backend_id.title().replace('_', '')
         )
         backend = backend()
+        from qiskit_aer.primitives import SamplerV2
+        sampler = SamplerV2.from_backend(backend)
         logger.info(f'Set {backend = }')   
 
     # otherwise use the given providername or backend_id to find the backend
@@ -445,10 +456,7 @@ def set_execution_target(backend_id='qasm_simulator',
                 except Exception as ex:
                     print(traceback.format_exc())
                     raise ex
-            
-            # set M3 options
-            use_m3 = exec_options.get("use_m3", False)
-            
+
             # set Sampler options
             options_dict = exec_options.get("sampler_options", None)
             options = SamplerOptions(**options_dict if options_dict else {})
@@ -723,7 +731,6 @@ def execute_circuit(circuit):
                 # perform circuit execution on backend
                 logger.info(f'Running trans_qc, shots={shots}')
                 st = time.time()
-                
                 if use_m3:
                     from mthree import M3Mitigation
                     from mthree.utils import final_measurement_mapping
@@ -734,7 +741,7 @@ def execute_circuit(circuit):
                 
                 if sampler:
                     # set job tags if SamplerV2 on IBM Quantum Platform
-                    if hasattr(sampler, "options"):
+                    if hasattr(sampler, "options") and hasattr(sampler.options, "environment"):
                         sampler.options.environment.job_tags = job_tags
 
                     # turn input into pub-like
@@ -1193,16 +1200,16 @@ def job_complete(job):
         # <result> contains results from multiple circuits
         # DEVNOTE: This will need to change; currently the only case where we have multiple result counts
         # is when using randomly_compile; later, there will be other cases
-        if not use_sessions and type(result.get_counts()) == list:
+        result_counts = result.get_counts()
+        if isinstance(result_counts, list):
             total_counts = dict()
-            for count in result.get_counts():
+            for count in result_counts:
                 if job in m3_mitigation:
                     mit, qubits = m3_mitigation[job]
-                    count = mit.apply_correction(count, qubits)
+                    count = mit.apply_correction(count, qubits).nearest_probability_distribution()
                 total_counts = dict(Counter(total_counts) + Counter(count))
                 
             # make a copy of the result object so we can return a modified version
-            orig_result = result
             result = copy.copy(result) 
 
             # replace the results array with an array containing only the first results object
@@ -1212,6 +1219,11 @@ def job_complete(job):
             results.shots = actual_shots
             results.data.counts = total_counts
             result.results = [ results ]
+        else:
+            if job in m3_mitigation:
+                mit, qubits = m3_mitigation[job]
+                count = mit.apply_correction(result_counts, qubits).nearest_probability_distribution()
+                result.set_counts(count)
             
         try:
             result_handler(active_circuit["qc"],
@@ -1738,7 +1750,7 @@ def calibrate_target(backend, session):
             target.update_instruction_properties(instruction=instruction_2q, qargs=qarg, properties=InstructionProperties(error=EPG_2q_result_list[pair_idx].value.nominal_value))
         except Exception:
             target.update_instruction_properties(instruction=instruction_2q, qargs=qarg[::-1], properties=InstructionProperties(error=EPG_2q_result_list[pair_idx].value.nominal_value))
-
+    return target
     # Remove bad qubits
     cmap = target.build_coupling_map(filter_idle_qubits=True)
     cmap_list = list(cmap.get_edges())
