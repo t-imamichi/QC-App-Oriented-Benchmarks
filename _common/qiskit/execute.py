@@ -449,10 +449,13 @@ def set_execution_target(backend_id='qasm_simulator',
             use_realtime_calibration = exec_options.get("use_realtime_calibration", False)
 
             global target
-            if use_realtime_calibration and target is None:
+            if use_realtime_calibration:
                 print("... calibrating target for qubit selection")
                 try:
-                    target = calibrate_target(backend, session)
+                    remove_bad_qubits = (use_realtime_calibration == 2)
+                    target = calibrate_target(
+                        backend, session, remove_bad_qubits=remove_bad_qubits
+                    )
                 except Exception as ex:
                     print(traceback.format_exc())
                     raise ex
@@ -613,6 +616,7 @@ def execute_circuit(circuit):
         optimization_level = backend_exec_options_copy.pop("optimization_level", None)
         layout_method = backend_exec_options_copy.pop("layout_method", None)
         routing_method = backend_exec_options_copy.pop("routing_method", None)
+        approximation_degree = backend_exec_options_copy.pop("approximation_degree", None)
         
         # option to transpile multiple times to find best one
         transpile_attempt_count = backend_exec_options_copy.pop("transpile_attempt_count", None)
@@ -704,7 +708,8 @@ def execute_circuit(circuit):
                 if transpile_attempt_count:
                     trans_qc = transpile_multiple_times(circuit["qc"], circuit["params"], backend,
                             target, transpile_attempt_count, 
-                            optimization_level=None, layout_method=None, routing_method=None)
+                            optimization_level=None, layout_method=None, routing_method=None,
+                            approximation_degree=approximation_degree)
                             
                 # transpile and bind circuit with parameters; use cache if flagged                       
                 else:
@@ -712,7 +717,8 @@ def execute_circuit(circuit):
                             target=target,
                             optimization_level=optimization_level,
                             layout_method=layout_method,
-                            routing_method=routing_method)
+                            routing_method=routing_method,
+                            approximation_degree=approximation_degree)
                 
                 # apply transformer pass if provided
                 if transformer:
@@ -929,16 +935,22 @@ def transpile_for_metrics(qc):
 # DEVNOTE: currently this only caches a single circuit
 def transpile_and_bind_circuit(circuit, params, backend, target, basis_gates=None,
                 optimization_level=None, layout_method=None, routing_method=None,
-                seed_transpiler=None):
+                approximation_degree=None, seed_transpiler=0):
                 
     logger.info('transpile_and_bind_circuit()')
     st = time.time()
         
     if do_transpile_for_execute:
         logger.info('transpiling for execute')
-        trans_qc = transpile(circuit, backend, target=target, basis_gates=basis_gates,
+        trans_qc = transpile(circuit, backend=backend, target=target, basis_gates=basis_gates,
                 optimization_level=optimization_level, layout_method=layout_method, routing_method=routing_method,
-                seed_transpiler=seed_transpiler)
+                approximation_degree=approximation_degree, seed_transpiler=seed_transpiler)
+        no_approx = transpile(circuit, backend=backend, target=target, basis_gates=basis_gates,
+                optimization_level=optimization_level, layout_method=layout_method, routing_method=routing_method,
+                approximation_degree=None, seed_transpiler=seed_transpiler)
+        print(f"  ... approximation degree {approximation_degree}:\n"
+              f"      (no approx) {no_approx.count_ops()}\n"
+              f"      -> (approx) {trans_qc.count_ops()}")
         
         # cache this transpiled circuit
         cached_circuits["last_circuit"] = trans_qc
@@ -980,7 +992,8 @@ def transpile_and_bind_circuit(circuit, params, backend, target, basis_gates=Non
 # Transpile a circuit multiple times for optimal results
 # DEVNOTE: this does not handle parameters yet
 def transpile_multiple_times(circuit, params, backend, target, transpile_attempt_count, 
-                optimization_level=None, layout_method=None, routing_method=None):
+                optimization_level=None, layout_method=None, routing_method=None,
+                approximation_degree=None):
     
     logger.info(f"transpile_multiple_times({transpile_attempt_count})")
     st = time.time()
@@ -994,6 +1007,7 @@ def transpile_multiple_times(circuit, params, backend, target, transpile_attempt
             optimization_level=optimization_level,
             layout_method=layout_method,
             routing_method=routing_method,
+            approximation_degree=approximation_degree,
             seed_transpiler=seed,
         ) for seed in range(transpile_attempt_count)
     ]
@@ -1655,7 +1669,7 @@ def job_wait_for_completion(job):
         print("\n... circuit execution failed.")
 
 
-def calibrate_target(backend, session):
+def calibrate_target(backend, session, remove_bad_qubits: bool = False):
     """
     Calibrate the target properties of a quantum backend.
 
@@ -1750,8 +1764,11 @@ def calibrate_target(backend, session):
             target.update_instruction_properties(instruction=instruction_2q, qargs=qarg, properties=InstructionProperties(error=EPG_2q_result_list[pair_idx].value.nominal_value))
         except Exception:
             target.update_instruction_properties(instruction=instruction_2q, qargs=qarg[::-1], properties=InstructionProperties(error=EPG_2q_result_list[pair_idx].value.nominal_value))
-    return target
-    # Remove bad qubits
+
+    if not remove_bad_qubits:
+        return target
+
+    # Remove bad qubits (`remove_bad_qubits == True`)
     cmap = target.build_coupling_map(filter_idle_qubits=True)
     cmap_list = list(cmap.get_edges())
 
@@ -1765,6 +1782,7 @@ def calibrate_target(backend, session):
         meas_err = target['measure'][(q,)].error
         t2 = target.qubit_properties[q].t2 * 1e6
         if meas_err > max_meas_err or t2 < min_t2:
+            print(f"  ... Removing qubit {q} due to bad T2 ({t2})")
             for q_pair in cmap_list:
                 if q in q_pair:
                     try:
@@ -1776,6 +1794,7 @@ def calibrate_target(backend, session):
     for q in cmap_list:
         twoq_gate_err = target[instruction_2q][q].error
         if twoq_gate_err > max_twoq_err:
+            print(f"  ... Removing qubits {q} due to bad 2Q gate error ({twoq_gate_err})")
             for q_pair in cmap_list:
                 if q == q_pair:
                     try:
