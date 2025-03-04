@@ -449,7 +449,7 @@ def set_execution_target(backend_id='qasm_simulator',
             use_realtime_calibration = exec_options.get("use_realtime_calibration", False)
 
             global target
-            if use_realtime_calibration:
+            if use_realtime_calibration and target is None:
                 print("... calibrating target for qubit selection")
                 try:
                     remove_bad_qubits = (use_realtime_calibration == 2)
@@ -948,10 +948,11 @@ def transpile_and_bind_circuit(circuit, params, backend, target, basis_gates=Non
         no_approx = transpile(circuit, backend=backend, target=target, basis_gates=basis_gates,
                 optimization_level=optimization_level, layout_method=layout_method, routing_method=routing_method,
                 approximation_degree=None, seed_transpiler=seed_transpiler)
-        print(f"  ... approximation degree {approximation_degree}:\n"
-              f"      (no approx) {no_approx.count_ops()}\n"
-              f"      -> (approx) {trans_qc.count_ops()}")
-        
+        if approximation_degree:
+            print(f"  ... approximation degree {approximation_degree}:\n"
+                f"      (no approx) {no_approx.count_ops()}\n"
+                f"      -> (approx) {trans_qc.count_ops()}")
+
         # cache this transpiled circuit
         cached_circuits["last_circuit"] = trans_qc
     
@@ -1782,7 +1783,10 @@ def calibrate_target(backend, session, remove_bad_qubits: bool = False):
         meas_err = target['measure'][(q,)].error
         t2 = target.qubit_properties[q].t2 * 1e6
         if meas_err > max_meas_err or t2 < min_t2:
-            print(f"  ... Removing qubit {q} due to bad T2 ({t2})")
+            if meas_err > max_meas_err:
+                print(f"  ... Removing qubit {q} due to bad measurement error ({meas_err})")
+            if t2 < min_t2:
+                print(f"  ... Removing qubit {q} due to bad T2 ({t2})")
             for q_pair in cmap_list:
                 if q in q_pair:
                     try:
