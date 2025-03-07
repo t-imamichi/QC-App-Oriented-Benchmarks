@@ -281,6 +281,9 @@ def set_execution_target(backend_id='qasm_simulator',
     if backend_id == None:
         backend_id="qasm_simulator"
 
+    if exec_options is None:
+        exec_options = {}
+
     # set M3 options
     use_m3 = exec_options.get("use_m3", False)
         
@@ -816,7 +819,6 @@ def wait_on_job_result(job, active_circuit):
             retry_count += 1
             result = job.result()
             break
-                         
         except Exception:
             print(f'... error occurred during job.result() for circuit {active_circuit["group"]} {active_circuit["circuit"]} -- retry {retry_count}')
             if verbose: print(traceback.format_exc())
@@ -933,7 +935,7 @@ def transpile_for_metrics(qc):
 # Cache the transpiled circuit, and use it if do_transpile_for_execute not set
 # DEVNOTE: this approach does not permit passing of untranspiled circuit through
 # DEVNOTE: currently this only caches a single circuit
-def transpile_and_bind_circuit(circuit, params, backend, target, basis_gates=None,
+def transpile_and_bind_circuit(circuit, params, backend, target=None, basis_gates=None,
                 optimization_level=None, layout_method=None, routing_method=None,
                 approximation_degree=None, seed_transpiler=0):
                 
@@ -1433,7 +1435,6 @@ def throttle_execution(completion_handler=metrics.finalize_group):
 # This is used as a way to complete all groups of circuits and report results.
 
 def finalize_execution(completion_handler=metrics.finalize_group, report_end=True):
-
     #if verbose:
         #print("... finalize_execution")
 
@@ -1528,6 +1529,14 @@ def check_jobs(completion_handler=None):
             print("... circuit execution failed.")
             if hasattr(job, "error_message"):
                 print(f"    job = {job.job_id()}  {job.error_message()}")
+            else:
+                try:
+                    _ = job.result()
+                except Exception as ex:
+                    print(f"    job = {job.job_id()}  '{ex.message}'")
+                    if verbose:
+                        print(traceback.format_exc())
+
 
         if status == JobStatus.DONE or status == JobStatus.CANCELLED or status == JobStatus.ERROR or status == 'DONE' or status =='CANCELLED' or status == 'ERROR':
             #if verbose: print("Job status is ", job.status() )
@@ -1701,7 +1710,7 @@ def calibrate_target(backend, session, remove_bad_qubits: bool = False):
     flattened_layered_coupling_map = []
     for layer in layered_coupling_map:
         flattened_layered_coupling_map += layer
-    
+
     t1_exp = ParallelExperiment([T1(physical_qubits=[qubit], delays=np.linspace(1e-6, 2*backend.properties().t1(qubit), 5, endpoint=True)) for qubit in qubits], backend, analysis=None)
     t2_exp = ParallelExperiment([T2Hahn(physical_qubits=[qubit], delays=np.linspace(1e-6, 2*backend.properties().t2(qubit), 5, endpoint=True)) for qubit in qubits], backend, analysis=None)
     readout_exp = LocalReadoutError(qubits)
@@ -1749,7 +1758,7 @@ def calibrate_target(backend, session, remove_bad_qubits: bool = False):
             target.update_instruction_properties(instruction='sx', qargs=qarg, properties=InstructionProperties(error=EPG_sx_result_list[i].value.nominal_value))
         if qarg in EPG_x_result_q_indices:
             target.update_instruction_properties(instruction='x', qargs=qarg, properties=InstructionProperties(error=EPG_x_result_list[i].value.nominal_value))
-            
+
         err_mat = Readout_result_list.value.assignment_matrix(i)
         readout_assignment_error = (err_mat[0, 1] + err_mat[1, 0]) / 2  # average readout error
         target.update_instruction_properties(instruction='measure', qargs=qarg, properties=InstructionProperties(error=readout_assignment_error))
@@ -1806,7 +1815,7 @@ def calibrate_target(backend, session, remove_bad_qubits: bool = False):
                     except Exception:
                         continue
 
-    custom_cmap = CouplingMap(cust_cmap_list) 
+    custom_cmap = CouplingMap(cust_cmap_list)
     custom_target = Target.from_configuration(
         basis_gates = backend.configuration().basis_gates + ['measure'], # or whatever new set of gates
         coupling_map = custom_cmap,
