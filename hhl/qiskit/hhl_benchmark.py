@@ -565,9 +565,12 @@ def postselect(outcomes, return_probs=True):
     
     mar_out = {}
     for b_str in outcomes:
+        # SamplerV2 result does not include white spaces between classical registers
+        # E.g., backend.run: "0 0", SamplerV2: "00"
+        b_str = b_str.replace(" ", "")
         if b_str[0] == '1':
             counts = outcomes[b_str]
-            mar_out[b_str[2:]] = counts
+            mar_out[b_str[1:]] = counts
             
     # compute postselection rate
     ps_shots = sum(mar_out.values())
@@ -851,5 +854,5 @@ def run2 (min_input_qubits=1, max_input_qubits=3, skip_qubits=1,
                          transform_qubit_group = transform_qubit_group, new_qubit_group = mid_circuit_qubit_group)
 
 # if main, execute method
-if __name__ == '__main__': run()
+if __name__ == '__main__': run(backend_id="fake_torino", exec_options={"use_m3": True})
    

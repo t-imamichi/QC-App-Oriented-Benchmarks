@@ -166,7 +166,8 @@ class BenchmarkResult:
         if self._counts:
             return self._counts
         qc_index = 0 # this should point to the index of the circuit in a pub
-        bitvals = next(iter(self.qiskit_result[qc_index].data.values()))
+        # merge outcomes of all classical registers
+        bitvals = self.qiskit_result[qc_index].join_data()
         self._counts = bitvals.get_counts()
         return self._counts
 
@@ -747,7 +748,7 @@ def execute_circuit(circuit):
                     qubits = final_measurement_mapping(trans_qc)
                     mit.cals_from_system(qubits, runtime_mode=session)
                     logger.info("calibrating M3")
-                
+
                 if sampler:
                     # set job tags if SamplerV2 on IBM Quantum Platform
                     if hasattr(sampler, "options") and hasattr(sampler.options, "environment"):
