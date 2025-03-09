@@ -621,7 +621,7 @@ def execute_circuit(circuit):
         optimization_level = backend_exec_options_copy.pop("optimization_level", None)
         layout_method = backend_exec_options_copy.pop("layout_method", None)
         routing_method = backend_exec_options_copy.pop("routing_method", None)
-        approximation_degree = backend_exec_options_copy.pop("approximation_degree", None)
+        approximation_degree = backend_exec_options_copy.pop("approximation_degree", 1.0)
         
         # option to transpile multiple times to find best one
         transpile_attempt_count = backend_exec_options_copy.pop("transpile_attempt_count", None)
@@ -948,7 +948,7 @@ def transpile_for_metrics(qc):
 # DEVNOTE: currently this only caches a single circuit
 def transpile_and_bind_circuit(circuit, params, backend, target=None, basis_gates=None,
                 optimization_level=None, layout_method=None, routing_method=None,
-                approximation_degree=None, seed_transpiler=0):
+                approximation_degree=1.0, seed_transpiler=0):
                 
     logger.info('transpile_and_bind_circuit()')
     st = time.time()
@@ -960,10 +960,10 @@ def transpile_and_bind_circuit(circuit, params, backend, target=None, basis_gate
                 approximation_degree=approximation_degree, seed_transpiler=seed_transpiler)
         no_approx = transpile(circuit, backend=backend, target=target, basis_gates=basis_gates,
                 optimization_level=optimization_level, layout_method=layout_method, routing_method=routing_method,
-                approximation_degree=None, seed_transpiler=seed_transpiler)
-        if approximation_degree:
+                approximation_degree=1.0, seed_transpiler=seed_transpiler)
+        if approximation_degree < 1.0:
             print(f"  ... approximation degree {approximation_degree}:\n"
-                f"      (approx=None) {no_approx.count_ops()}\n"
+                f"      (approx=1) {no_approx.count_ops()}\n"
                 f"      -> (approx={approximation_degree}) {trans_qc.count_ops()}")
 
         # cache this transpiled circuit
