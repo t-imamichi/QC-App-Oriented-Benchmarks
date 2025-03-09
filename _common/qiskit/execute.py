@@ -79,6 +79,7 @@ sampler = None
 # M3 mitigation
 use_m3 = False
 m3_mitigation = {}
+m3_cache = {}
 
 # Use the IBM Quantum Platform system; default is to use the IBM Cloud
 use_ibm_quantum_platform = False
@@ -744,10 +745,19 @@ def execute_circuit(circuit):
                 if use_m3:
                     from mthree import M3Mitigation
                     from mthree.utils import final_measurement_mapping
-                    mit = M3Mitigation(backend)
-                    qubits = final_measurement_mapping(trans_qc)
-                    mit.cals_from_system(qubits, runtime_mode=session)
-                    logger.info("calibrating M3")
+                    mapping = final_measurement_mapping(trans_qc)
+                    qubits = tuple(mapping.values())
+                    sorted_qubits = tuple(sorted(set(qubits)))
+                    if sorted_qubits in m3_cache:
+                        mit = m3_cache[sorted_qubits]
+                        logger.info(f"Use cached M3 {sorted_qubits=}")
+                        print(f"Use cached M3 {sorted_qubits=}")
+                    else:
+                        mit = M3Mitigation(backend)
+                        mit.cals_from_system(sorted_qubits, runtime_mode=session)
+                        m3_cache[sorted_qubits] = mit
+                        logger.info(f"Calibrating M3 {sorted_qubits=}")
+                        print(f"Calibrating M3 {sorted_qubits=}")
 
                 if sampler:
                     # set job tags if SamplerV2 on IBM Quantum Platform
@@ -953,8 +963,8 @@ def transpile_and_bind_circuit(circuit, params, backend, target=None, basis_gate
                 approximation_degree=None, seed_transpiler=seed_transpiler)
         if approximation_degree:
             print(f"  ... approximation degree {approximation_degree}:\n"
-                f"      (no approx) {no_approx.count_ops()}\n"
-                f"      -> (approx) {trans_qc.count_ops()}")
+                f"      (approx=None) {no_approx.count_ops()}\n"
+                f"      -> (approx={approximation_degree}) {trans_qc.count_ops()}")
 
         # cache this transpiled circuit
         cached_circuits["last_circuit"] = trans_qc
