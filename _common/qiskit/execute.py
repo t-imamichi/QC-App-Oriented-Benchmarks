@@ -321,10 +321,14 @@ def set_execution_target(backend_id='qasm_simulator',
     # handle Statevector simulator specially
     elif backend_id == 'statevector_simulator':
         backend = Aer.get_backend("statevector_simulator")
-    
+
     elif backend_id == "statevector_sampler":
         from qiskit.primitives import StatevectorSampler
         sampler = StatevectorSampler()
+
+    elif backend_id == "aer_sampler":
+        from qiskit_aer.primitives import SamplerV2 as AerSampler
+        sampler = AerSampler()
 
     # handle 'fake' backends here
     elif 'fake' in backend_id:
