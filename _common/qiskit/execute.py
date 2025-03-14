@@ -755,13 +755,11 @@ def execute_circuit(circuit):
                     if sorted_qubits in m3_cache:
                         mit = m3_cache[sorted_qubits]
                         logger.info(f"Use cached M3 {sorted_qubits=}")
-                        print(f"Use cached M3 {sorted_qubits=}")
                     else:
                         mit = M3Mitigation(backend)
                         mit.cals_from_system(sorted_qubits, runtime_mode=session)
                         m3_cache[sorted_qubits] = mit
                         logger.info(f"Calibrating M3 {sorted_qubits=}")
-                        print(f"Calibrating M3 {sorted_qubits=}")
 
                 if sampler:
                     # set job tags if SamplerV2 on IBM Quantum Platform
